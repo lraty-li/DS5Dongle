@@ -28,9 +28,9 @@ int main(void)
 
     board_init();
 
-    printf("DS5Dongle BL616 BR/EDR discovery bring-up\r\n");
+    printf("DS5Dongle BL616 BR/EDR connection bring-up\r\n");
 
-    configASSERT(configMAX_PRIORITIES > 4U);
+    configASSERT(configMAX_PRIORITIES > 5U);
 
     if (rfparam_init(0U, NULL, 0U) != 0) {
         printf("DS5: PHY RF initialization failed\r\n");

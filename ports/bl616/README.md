@@ -26,8 +26,11 @@ The platform-independent DualSense wire-format tests use the repository Python
 entry point and do not require the target board:
 
 ```powershell
-.\tools\host\python3.cmd .\ports\bl616\tests\test_ds5_protocol.py
+.\tools\host\python3.cmd -m unittest discover `
+    -s .\ports\bl616\tests -p "test_*.py" -v
 ```
 
-The BL616 clean build compiles the corresponding C implementation with the
-repository-pinned RISC-V toolchain.
+These cover the wire format, the BR/EDR discovery candidate policy, and source
+contracts for the connection/security state machine. The BL616 clean build
+compiles the corresponding C implementations with the repository-pinned
+RISC-V toolchain.

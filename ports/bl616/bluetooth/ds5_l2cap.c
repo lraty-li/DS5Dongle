@@ -341,6 +341,15 @@ bool ds5_l2cap_event_try_receive(ds5_l2cap_event_t *event)
     return xQueueReceive(event_queue, event, 0U) == pdPASS;
 }
 
+bool ds5_l2cap_event_receive(ds5_l2cap_event_t *event)
+{
+    if ((event_queue == NULL) || (event == NULL)) {
+        return false;
+    }
+
+    return xQueueReceive(event_queue, event, portMAX_DELAY) == pdPASS;
+}
+
 uint32_t ds5_l2cap_dropped_event_count(void)
 {
     return dropped_event_count;
