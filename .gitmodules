@@ -4,3 +4,6 @@
 [submodule "lib/opus"]
 	path = lib/opus
 	url = https://github.com/xiph/opus
+[submodule "third_party/bouffalo_sdk"]
+	path = third_party/bouffalo_sdk
+	url = https://github.com/bouffalolab/bouffalo_sdk.git
