@@ -6,6 +6,7 @@ sdk_add_include_directories(. bluetooth config)
 
 target_sources(app PRIVATE
     bluetooth/ds5_bt.c
+    ds5/ds5_protocol.c
 )
 
 sdk_set_main_file(main.c)
