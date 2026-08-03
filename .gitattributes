@@ -1,0 +1,41 @@
+* text=auto
+
+# C/C++ source
+*.c             text eol=lf
+*.h             text eol=lf
+*.cc            text eol=lf
+*.cpp           text eol=lf
+*.hpp           text eol=lf
+
+# Build configuration
+Makefile        text eol=lf
+*.mk            text eol=lf
+CMakeLists.txt  text eol=lf
+*.cmake         text eol=lf
+Kconfig         text eol=lf
+defconfig       text eol=lf
+*.ini           text eol=lf
+
+# Scripts and documentation
+*.ps1           text eol=lf
+*.sh            text eol=lf
+*.py            text eol=lf
+*.md            text eol=lf
+*.txt           text eol=lf
+
+# Native Windows command scripts
+*.cmd           text eol=crlf
+*.bat           text eol=crlf
+
+# Binary files
+*.bin           binary
+*.elf           binary
+*.a             binary
+*.lib           binary
+*.exe           binary
+*.dll           binary
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.pdf           binary
+*.xz            binary
