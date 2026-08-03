@@ -11,6 +11,8 @@
 #include "conn.h"
 #include "hci_driver.h"
 
+#include "ds5_l2cap.h"
+
 #define DS5_BT_DISCOVERY_RESULT_COUNT 10U
 #define DS5_BT_DISCOVERY_LENGTH       0x05U
 
@@ -158,6 +160,14 @@ static void ds5_bt_ready(int err)
         printf("DS5 BT: auth callback registration failed (err %d)\r\n", err);
         return;
     }
+
+    err = ds5_l2cap_init();
+    if (err != 0) {
+        printf("DS5 BT: HID L2CAP registration failed (err %d)\r\n", err);
+        return;
+    }
+
+    printf("DS5 BT: HID L2CAP servers ready\r\n");
 
     err = bt_br_discovery_start(&discovery_param, discovery_results,
                                 DS5_BT_DISCOVERY_RESULT_COUNT,
