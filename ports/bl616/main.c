@@ -2,6 +2,8 @@
 #include "task.h"
 
 #include "board.h"
+#include "bflb_mtd.h"
+#include "easyflash.h"
 #include "rfparam_adapter.h"
 
 #include "ds5_bt.h"
@@ -81,6 +83,7 @@ static void app_start_task(void *parameter)
 int main(void)
 {
     BaseType_t task_result;
+    EfErrCode storage_err;
     int rf_err;
 
     board_init();
@@ -89,6 +92,17 @@ int main(void)
     ds5_log_printf("DS5Dongle BL616 BR/EDR connection bring-up\r\n");
 
     configASSERT(configMAX_PRIORITIES > 5U);
+
+    /* Match the pinned SDK btble_cli persistent-settings initialization. */
+    bflb_mtd_init();
+    storage_err = easyflash_init();
+    if (storage_err != EF_NO_ERR) {
+        ds5_log_printf("DS5: pairing storage initialization failed "
+                       "(err %d)\r\n",
+                       (int)storage_err);
+        return 0;
+    }
+    ds5_log_printf("DS5: pairing storage ready\r\n");
 
     /* Match the pinned SDK btble_cli and wifi_http initialization order. */
     rf_err = rfparam_init(0U, NULL, 0U);

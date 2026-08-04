@@ -30,6 +30,7 @@
 
 typedef struct {
     bool valid;
+    bool saved_address;
     bt_addr_t address;
     uint32_t device_class;
     int8_t rssi;
@@ -331,6 +332,9 @@ static void ds5_bt_auth_pincode_entry(struct bt_conn *conn, bool highsec)
 static void ds5_bt_pairing_complete(struct bt_conn *conn, bool bonded)
 {
     if (conn == active_connection) {
+        if (bonded && ds5_bt_connection_matches_candidate(conn)) {
+            candidate.saved_address = true;
+        }
         printf("DS5 BT: pairing complete (bonded %u)\r\n",
                bonded ? 1U : 0U);
     }
@@ -377,6 +381,7 @@ static void ds5_bt_consider_candidate(
     }
 
     candidate.valid = true;
+    candidate.saved_address = false;
     bt_addr_copy(&candidate.address, &result->addr);
     candidate.device_class = device_class;
     candidate.rssi = result->rssi;
@@ -387,6 +392,28 @@ static void ds5_bt_consider_candidate(
     } else {
         candidate.name[0] = '\0';
     }
+}
+
+static void ds5_bt_restore_bond(const struct bt_br_bond_info *info,
+                                void *user_data)
+{
+    size_t *bond_count = user_data;
+
+    if ((info == NULL) || (info->addr == NULL) || (bond_count == NULL)) {
+        return;
+    }
+
+    ++(*bond_count);
+    if (candidate.valid) {
+        return;
+    }
+
+    memset(&candidate, 0, sizeof(candidate));
+    candidate.valid = true;
+    candidate.saved_address = true;
+    bt_addr_copy(&candidate.address, info->addr);
+    candidate.rssi = INT8_MIN;
+    candidate.score = ds5_bt_policy_candidate_score(0U, NULL, true);
 }
 
 static void ds5_bt_discovery_complete(struct bt_br_discovery_result *results,
@@ -623,6 +650,8 @@ static int ds5_bt_start_worker(void)
 
 static void ds5_bt_ready(int err)
 {
+    size_t bond_count = 0U;
+
     if (err != 0) {
         printf("DS5 BT: host initialization failed (err %d)\r\n", err);
         ds5_bt_set_state(DS5_BT_STATE_OFF);
@@ -652,6 +681,32 @@ static void ds5_bt_ready(int err)
     }
 
     printf("DS5 BT: HID L2CAP servers ready\r\n");
+
+    /* bt_enable() has already restored BR link keys before this callback. */
+    memset(&candidate, 0, sizeof(candidate));
+    bt_br_foreach_bond(ds5_bt_restore_bond, &bond_count);
+    if (candidate.valid) {
+        char address[BT_ADDR_STR_LEN];
+
+        bt_addr_to_str(&candidate.address, address, sizeof(address));
+        printf("DS5 BT: restored saved BR/EDR peer %s "
+               "(%u bond(s) stored)\r\n",
+               address, (unsigned int)bond_count);
+        if (bond_count > 1U) {
+            printf("DS5 BT: multiple bonds present; using the first saved "
+                   "peer\r\n");
+        }
+
+        err = bt_br_set_connectable(true);
+        if (err != 0) {
+            printf("DS5 BT: connectable enable failed (err %d)\r\n", err);
+        }
+
+        ds5_bt_set_state(DS5_BT_STATE_CANDIDATE_READY);
+        return;
+    }
+
+    printf("DS5 BT: no saved BR/EDR peer\r\n");
     ds5_bt_set_state(DS5_BT_STATE_IDLE);
     err = ds5_bt_start_discovery();
     if (err != 0) {
@@ -745,6 +800,47 @@ int ds5_bt_connect_candidate(void)
 int ds5_bt_disconnect(void)
 {
     return ds5_bt_disconnect_active(BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+}
+
+int ds5_bt_clear_pairing(void)
+{
+    ds5_bt_candidate_t previous_candidate;
+    int connectable_err;
+    int err;
+
+    if (bluetooth_state == DS5_BT_STATE_OFF) {
+        return -EAGAIN;
+    }
+
+    /* The discovery callback owns candidate selection until it completes. */
+    if (bluetooth_state == DS5_BT_STATE_DISCOVERING) {
+        return -EBUSY;
+    }
+
+    previous_candidate = candidate;
+    memset(&candidate, 0, sizeof(candidate));
+    err = bt_unpair(BT_ID_DEFAULT, NULL);
+    if (err != 0) {
+        candidate = previous_candidate;
+        printf("DS5 BT: failed to clear pairing information (err %d)\r\n",
+               err);
+        return err;
+    }
+
+    connectable_err = bt_br_set_connectable(false);
+    if (connectable_err != 0) {
+        printf("DS5 BT: connectable disable failed after unpair (err %d)\r\n",
+               connectable_err);
+    }
+
+    if (active_connection != NULL) {
+        ds5_bt_set_state(DS5_BT_STATE_DISCONNECTING);
+    } else {
+        ds5_bt_set_state(DS5_BT_STATE_IDLE);
+    }
+
+    printf("DS5 BT: all pairing information cleared\r\n");
+    return 0;
 }
 
 ds5_bt_state_t ds5_bt_get_state(void)

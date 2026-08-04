@@ -25,6 +25,8 @@ int ds5_bt_start_discovery(void);
 bool ds5_bt_candidate_available(void);
 int ds5_bt_connect_candidate(void);
 int ds5_bt_disconnect(void);
+/* Task-context API; clears every BR/EDR bond owned by this firmware. */
+int ds5_bt_clear_pairing(void);
 ds5_bt_state_t ds5_bt_get_state(void);
 uint32_t ds5_bt_received_l2cap_packet_count(void);
 

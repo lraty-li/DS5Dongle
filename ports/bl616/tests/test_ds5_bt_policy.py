@@ -131,6 +131,27 @@ class Ds5BtPolicyTests(unittest.TestCase):
         )
         self.assertIn("ds5_bt_security_ready(conn)", connected_body)
 
+    def test_saved_bond_is_restored_before_falling_back_to_discovery(self):
+        source = BT_SOURCE_PATH.read_text(encoding="utf-8")
+        ready_start = source.index("static void ds5_bt_ready")
+        ready_end = source.index("int ds5_bt_init(void)")
+        ready_body = source[ready_start:ready_end]
+
+        self.assertLess(
+            ready_body.index("bt_br_foreach_bond"),
+            ready_body.index("ds5_bt_start_discovery"),
+        )
+        self.assertIn("bt_br_set_connectable(true)", ready_body)
+
+    def test_pairing_clear_uses_public_pinned_sdk_api(self):
+        source = BT_SOURCE_PATH.read_text(encoding="utf-8")
+        clear_start = source.index("int ds5_bt_clear_pairing(void)")
+        clear_end = source.index("ds5_bt_state_t ds5_bt_get_state(void)")
+        clear_body = source[clear_start:clear_end]
+
+        self.assertIn("bt_unpair(BT_ID_DEFAULT, NULL)", clear_body)
+        self.assertNotIn("ef_", clear_body)
+
     def test_connection_pointer_follows_vendor_sticky_ref_contract(self):
         source = BT_SOURCE_PATH.read_text(encoding="utf-8")
         self.assertNotIn("bt_conn_ref(", source)
