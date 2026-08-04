@@ -8,8 +8,12 @@
 #include "ds5_log.h"
 #include "ds5_usb_log.h"
 
+#define DS5_BT_DISCOVERY_WAIT_MS 20000U
+
 static void app_start_task(void *parameter)
 {
+    TickType_t discovery_wait_start;
+    ds5_bt_state_t bluetooth_state;
     int err;
 
     (void)parameter;
@@ -30,6 +34,35 @@ static void app_start_task(void *parameter)
                        err);
     } else {
         ds5_log_printf("DS5 USB: CDC diagnostic interface initialized\r\n");
+    }
+
+    discovery_wait_start = xTaskGetTickCount();
+    do {
+        bluetooth_state = ds5_bt_get_state();
+        if ((bluetooth_state == DS5_BT_STATE_CANDIDATE_READY) ||
+            (bluetooth_state == DS5_BT_STATE_IDLE)) {
+            break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50U));
+    } while ((xTaskGetTickCount() - discovery_wait_start) <
+             pdMS_TO_TICKS(DS5_BT_DISCOVERY_WAIT_MS));
+
+    if (ds5_bt_get_state() == DS5_BT_STATE_CANDIDATE_READY) {
+        err = ds5_bt_connect_candidate();
+        if (err != 0) {
+            ds5_log_printf("DS5: candidate ACL connection failed to start "
+                           "(err %d)\r\n",
+                           err);
+        } else {
+            ds5_log_printf("DS5: candidate ACL connection started\r\n");
+        }
+    } else if (ds5_bt_get_state() == DS5_BT_STATE_IDLE) {
+        ds5_log_printf("DS5: discovery completed without a connectable "
+                       "candidate\r\n");
+    } else {
+        ds5_log_printf("DS5: timed out waiting for discovery (state %u)\r\n",
+                       (unsigned int)ds5_bt_get_state());
     }
 
     vTaskDelete(NULL);
