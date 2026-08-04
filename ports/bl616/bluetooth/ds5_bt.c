@@ -552,18 +552,23 @@ int ds5_bt_init(void)
 
     printf("DS5 BT: initializing controller\r\n");
     btble_controller_init(configMAX_PRIORITIES - 1U);
+    printf("DS5 BT: controller initialized\r\n");
 
+    printf("DS5 BT: initializing HCI driver\r\n");
     err = hci_driver_init();
     if (err != 0) {
         printf("DS5 BT: HCI driver initialization failed (err %d)\r\n", err);
         return err;
     }
+    printf("DS5 BT: HCI driver initialized\r\n");
 
+    printf("DS5 BT: enabling host\r\n");
     err = bt_enable(ds5_bt_ready);
     if (err != 0) {
         printf("DS5 BT: bt_enable failed (err %d)\r\n", err);
         return err;
     }
+    printf("DS5 BT: host enable submitted\r\n");
 
     return 0;
 }

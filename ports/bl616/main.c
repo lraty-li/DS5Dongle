@@ -11,12 +11,18 @@
 static void app_start_task(void *parameter)
 {
     int err;
-    int rf_err;
 
     (void)parameter;
 
-    /* The pinned SDK initializes RF/PLL state before starting USB. */
-    rf_err = rfparam_init(0U, NULL, 0U);
+    /*
+     * The pinned BL616 controller library resets the PDS block from
+     * btble_controller_init(). PDS owns USB power/PLL/reset controls, so USB
+     * must not be initialized until the controller reset has completed.
+     */
+    err = ds5_bt_init();
+    if (err != 0) {
+        ds5_log_printf("DS5: Bluetooth startup failed (err %d)\r\n", err);
+    }
 
     err = ds5_usb_log_init();
     if (err != 0) {
@@ -26,25 +32,13 @@ static void app_start_task(void *parameter)
         ds5_log_printf("DS5 USB: CDC diagnostic interface initialized\r\n");
     }
 
-    if (rf_err != 0) {
-        ds5_log_printf("DS5: PHY RF initialization failed\r\n");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ds5_log_printf("DS5: PHY RF initialization complete\r\n");
-
-    err = ds5_bt_init();
-    if (err != 0) {
-        ds5_log_printf("DS5: Bluetooth startup failed (err %d)\r\n", err);
-    }
-
     vTaskDelete(NULL);
 }
 
 int main(void)
 {
     BaseType_t task_result;
+    int rf_err;
 
     board_init();
     ds5_log_init();
@@ -52,6 +46,15 @@ int main(void)
     ds5_log_printf("DS5Dongle BL616 BR/EDR connection bring-up\r\n");
 
     configASSERT(configMAX_PRIORITIES > 5U);
+
+    /* Match the pinned SDK btble_cli and wifi_http initialization order. */
+    rf_err = rfparam_init(0U, NULL, 0U);
+    if (rf_err != 0) {
+        ds5_log_printf("DS5: PHY RF initialization failed (err %d)\r\n",
+                       rf_err);
+        return 0;
+    }
+    ds5_log_printf("DS5: PHY RF initialization complete\r\n");
 
     task_result = xTaskCreate(app_start_task, "app_start", 1024U, NULL,
                               configMAX_PRIORITIES - 2U, NULL);
