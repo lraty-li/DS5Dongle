@@ -20,6 +20,15 @@ _Static_assert(DS5_BT_OUTPUT_CRC_OFFSET + 4U == DS5_BT_OUTPUT_REPORT_SIZE,
 _Static_assert(DS5_BT_OUTPUT_STATE_OFFSET + DS5_SET_STATE_SIZE <=
                    DS5_BT_OUTPUT_CRC_OFFSET,
                "Bluetooth output state overlaps CRC");
+_Static_assert(DS5_BT_HAPTICS_REPORT_SIZE + 1U ==
+                   DS5_BT_HAPTICS_TRANSACTION_SIZE,
+               "Bluetooth haptics transaction size mismatch");
+_Static_assert(DS5_BT_HAPTICS_CRC_OFFSET + 4U ==
+                   DS5_BT_HAPTICS_REPORT_SIZE,
+               "Bluetooth haptics CRC offset mismatch");
+_Static_assert(DS5_BT_HAPTICS_DATA_OFFSET + DS5_HAPTICS_DATA_SIZE <=
+                   DS5_BT_HAPTICS_CRC_OFFSET,
+               "Bluetooth haptics data overlaps CRC");
 
 static uint32_t ds5_crc32_seeded(const uint8_t *data, size_t length,
                                  uint32_t seed)
@@ -141,6 +150,68 @@ ds5_protocol_result_t ds5_build_bt_output_transaction(
 
     sequence->next_value = (uint8_t)((sequence_value + 1U) & 0x0FU);
     *bt_transaction_length = DS5_BT_OUTPUT_TRANSACTION_SIZE;
+    return DS5_PROTOCOL_OK;
+}
+
+ds5_protocol_result_t ds5_build_bt_haptics_transaction(
+    ds5_output_sequence_t *sequence,
+    uint8_t *packet_counter,
+    const uint8_t *haptics_data,
+    size_t haptics_data_length,
+    uint8_t *bt_transaction,
+    size_t bt_transaction_capacity,
+    size_t *bt_transaction_length)
+{
+    uint8_t *bt_report;
+    uint8_t sequence_value;
+    uint32_t crc;
+
+    if (bt_transaction_length != NULL) {
+        *bt_transaction_length = 0U;
+    }
+
+    if ((sequence == NULL) || (packet_counter == NULL) ||
+        (haptics_data == NULL) || (bt_transaction == NULL) ||
+        (bt_transaction_length == NULL)) {
+        return DS5_PROTOCOL_ERROR_ARGUMENT;
+    }
+
+    if (haptics_data_length != DS5_HAPTICS_DATA_SIZE) {
+        return DS5_PROTOCOL_ERROR_LENGTH;
+    }
+
+    if (bt_transaction_capacity < DS5_BT_HAPTICS_TRANSACTION_SIZE) {
+        return DS5_PROTOCOL_ERROR_CAPACITY;
+    }
+
+    memset(bt_transaction, 0, DS5_BT_HAPTICS_TRANSACTION_SIZE);
+    bt_transaction[0] = DS5_BT_OUTPUT_TRANSACTION_HEADER;
+    bt_report = &bt_transaction[1];
+
+    sequence_value = sequence->next_value & 0x0FU;
+    bt_report[0] = DS5_BT_HAPTICS_REPORT_ID;
+    bt_report[DS5_BT_HAPTICS_SEQUENCE_OFFSET] =
+        (uint8_t)(sequence_value << 4U);
+    bt_report[2] = DS5_BT_HAPTICS_STREAM_FLAGS;
+    bt_report[3] = DS5_BT_HAPTICS_HEADER_LENGTH;
+    bt_report[4] = DS5_BT_HAPTICS_ROUTING;
+    bt_report[5] = DS5_BT_HAPTICS_BUFFER_LENGTH;
+    bt_report[6] = DS5_BT_HAPTICS_BUFFER_LENGTH;
+    bt_report[7] = DS5_BT_HAPTICS_BUFFER_LENGTH;
+    bt_report[8] = DS5_BT_HAPTICS_BUFFER_LENGTH;
+    *packet_counter = (uint8_t)(*packet_counter + 2U);
+    bt_report[9] = *packet_counter;
+    bt_report[10] = DS5_BT_HAPTICS_BLOCK_FLAGS;
+    bt_report[11] = DS5_BT_HAPTICS_BLOCK_LENGTH;
+    memcpy(&bt_report[DS5_BT_HAPTICS_DATA_OFFSET], haptics_data,
+           DS5_HAPTICS_DATA_SIZE);
+
+    crc = ds5_crc32_seeded(bt_report, DS5_BT_HAPTICS_CRC_OFFSET,
+                           DS5_OUTPUT_CRC32_SEED);
+    ds5_write_u32_le(&bt_report[DS5_BT_HAPTICS_CRC_OFFSET], crc);
+
+    sequence->next_value = (uint8_t)((sequence_value + 1U) & 0x0FU);
+    *bt_transaction_length = DS5_BT_HAPTICS_TRANSACTION_SIZE;
     return DS5_PROTOCOL_OK;
 }
 

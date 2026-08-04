@@ -7,6 +7,7 @@
 #include "rfparam_adapter.h"
 
 #include "ds5_bt.h"
+#include "ds5_haptics_mailbox.h"
 #include "ds5_input_mailbox.h"
 #include "ds5_output_mailbox.h"
 #include "ds5_log.h"
@@ -112,6 +113,14 @@ int main(void)
     mailbox_err = ds5_output_mailbox_init();
     if (mailbox_err != 0) {
         ds5_log_printf("DS5: output mailbox initialization failed "
+                       "(err %d)\r\n",
+                       mailbox_err);
+        return 0;
+    }
+
+    mailbox_err = ds5_haptics_mailbox_init();
+    if (mailbox_err != 0) {
+        ds5_log_printf("DS5: haptics mailbox initialization failed "
                        "(err %d)\r\n",
                        mailbox_err);
         return 0;

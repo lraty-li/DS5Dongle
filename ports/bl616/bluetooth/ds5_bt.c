@@ -17,6 +17,7 @@
 
 #include "ds5_bt_policy.h"
 #include "ds5_feature_cache.h"
+#include "ds5_haptics_mailbox.h"
 #include "ds5_l2cap.h"
 #include "ds5_input_mailbox.h"
 #include "ds5_output_mailbox.h"
@@ -29,11 +30,12 @@
 #define DS5_BT_DISCOVERY_LENGTH       0x05U
 #define DS5_BT_CANDIDATE_NAME_SIZE    64U
 #define DS5_BT_WORKER_STACK_DEPTH     (configMINIMAL_STACK_SIZE * 4U)
-#define DS5_BT_TX_WORKER_STACK_DEPTH  (configMINIMAL_STACK_SIZE * 4U)
+#define DS5_BT_TX_WORKER_STACK_DEPTH  (configMINIMAL_STACK_SIZE * 6U)
 #define DS5_BT_INPUT_LOG_INTERVAL     1024U
 #define DS5_BT_OUTPUT_LOG_INTERVAL    256U
-#define DS5_BT_OUTPUT_READY_WAIT_MS    20U
-#define DS5_BT_OUTPUT_READY_WAIT_COUNT 250U
+#define DS5_BT_HAPTICS_LOG_INTERVAL   256U
+#define DS5_BT_OUTPUT_READY_TIMEOUT_MS 5000U
+#define DS5_BT_TX_POLL_MS              1U
 
 static const uint8_t feature_prefetch_ids[] = {
     0x05U,
@@ -79,8 +81,12 @@ static uint32_t invalid_input_reports;
 static uint32_t input_mailbox_publish_failures;
 static uint32_t transmitted_output_reports;
 static uint32_t failed_output_reports;
+static uint32_t transmitted_haptics_reports;
+static uint32_t failed_haptics_reports;
+static uint32_t discarded_haptics_not_ready;
 static uint8_t latest_usb_input_payload[DS5_USB_INPUT_PAYLOAD_SIZE];
 static ds5_output_sequence_t output_sequence;
+static uint8_t haptics_packet_counter;
 
 static const struct bt_br_discovery_param discovery_param = {
     .length = DS5_BT_DISCOVERY_LENGTH,
@@ -184,6 +190,7 @@ static void ds5_bt_reset_link_state(void)
     feature_request_pending = false;
     feature_prefetch_index = 0U;
     ds5_output_sequence_reset(&output_sequence, 0U);
+    haptics_packet_counter = 0U;
 }
 
 static void ds5_bt_return_to_candidate(void)
@@ -707,80 +714,163 @@ static void ds5_bt_worker(void *parameter)
     }
 }
 
+static bool ds5_bt_interrupt_ready(void)
+{
+    return (bluetooth_state == DS5_BT_STATE_READY) &&
+           interrupt_channel_ready;
+}
+
+static void ds5_bt_forward_usb_output(
+    const uint8_t *usb_report,
+    uint8_t *bt_transaction,
+    size_t bt_transaction_capacity)
+{
+    size_t transaction_length;
+    ds5_protocol_result_t protocol_result;
+    ds5_output_sequence_t previous_sequence = output_sequence;
+    int send_result;
+
+    protocol_result = ds5_build_bt_output_transaction(
+        &output_sequence, usb_report, DS5_USB_OUTPUT_REPORT_SIZE,
+        bt_transaction, bt_transaction_capacity, &transaction_length);
+    if (protocol_result != DS5_PROTOCOL_OK) {
+        ++failed_output_reports;
+        if (failed_output_reports <= 4U) {
+            printf("DS5 BT: USB output report rejected (result %d)\r\n",
+                   (int)protocol_result);
+        }
+        return;
+    }
+
+    send_result = ds5_l2cap_send(DS5_L2CAP_CHANNEL_INTERRUPT,
+                                 bt_transaction, transaction_length);
+    if (send_result < 0) {
+        output_sequence = previous_sequence;
+        ++failed_output_reports;
+        if (failed_output_reports <= 4U) {
+            printf("DS5 BT: HID output send failed (err %d)\r\n",
+                   send_result);
+        }
+        return;
+    }
+
+    ++transmitted_output_reports;
+    if (transmitted_output_reports == 1U) {
+        printf("DS5 BT: first USB output report forwarded\r\n");
+    } else if ((transmitted_output_reports %
+                DS5_BT_OUTPUT_LOG_INTERVAL) == 0U) {
+        printf("DS5 BT: output reports forwarded %lu, failed %lu\r\n",
+               (unsigned long)transmitted_output_reports,
+               (unsigned long)failed_output_reports);
+    }
+}
+
+static void ds5_bt_forward_haptics(
+    const uint8_t *haptics_data,
+    uint8_t *bt_transaction,
+    size_t bt_transaction_capacity)
+{
+    size_t transaction_length;
+    ds5_protocol_result_t protocol_result;
+    ds5_output_sequence_t previous_sequence = output_sequence;
+    uint8_t previous_packet_counter = haptics_packet_counter;
+    int send_result;
+
+    protocol_result = ds5_build_bt_haptics_transaction(
+        &output_sequence, &haptics_packet_counter,
+        haptics_data, DS5_HAPTICS_DATA_SIZE,
+        bt_transaction, bt_transaction_capacity, &transaction_length);
+    if (protocol_result != DS5_PROTOCOL_OK) {
+        output_sequence = previous_sequence;
+        haptics_packet_counter = previous_packet_counter;
+        ++failed_haptics_reports;
+        if (failed_haptics_reports <= 4U) {
+            printf("DS5 BT: haptics report rejected (result %d)\r\n",
+                   (int)protocol_result);
+        }
+        return;
+    }
+
+    send_result = ds5_l2cap_send(DS5_L2CAP_CHANNEL_INTERRUPT,
+                                 bt_transaction, transaction_length);
+    if (send_result < 0) {
+        output_sequence = previous_sequence;
+        haptics_packet_counter = previous_packet_counter;
+        ++failed_haptics_reports;
+        if (failed_haptics_reports <= 4U) {
+            printf("DS5 BT: haptics send failed (err %d)\r\n",
+                   send_result);
+        }
+        return;
+    }
+
+    ++transmitted_haptics_reports;
+    if (transmitted_haptics_reports == 1U) {
+        printf("DS5 BT: first native haptics report forwarded "
+               "(%lu pre-ready block(s) discarded)\r\n",
+               (unsigned long)discarded_haptics_not_ready);
+    } else if ((transmitted_haptics_reports %
+                DS5_BT_HAPTICS_LOG_INTERVAL) == 0U) {
+        printf("DS5 BT: haptics reports forwarded %lu, failed %lu, "
+               "mailbox dropped %lu\r\n",
+               (unsigned long)transmitted_haptics_reports,
+               (unsigned long)failed_haptics_reports,
+               (unsigned long)ds5_haptics_mailbox_dropped_count());
+    }
+}
+
 static void ds5_bt_tx_worker(void *parameter)
 {
     uint8_t usb_report[DS5_USB_OUTPUT_REPORT_SIZE];
-    uint8_t bt_transaction[DS5_BT_OUTPUT_TRANSACTION_SIZE];
+    uint8_t haptics_data[DS5_HAPTICS_DATA_SIZE];
+    uint8_t bt_transaction[DS5_BT_HAPTICS_TRANSACTION_SIZE];
+    bool pending_usb_output = false;
+    TickType_t pending_usb_output_since = 0U;
 
     (void)parameter;
 
     while (1) {
-        uint32_t wait_count;
-        size_t transaction_length;
-        ds5_protocol_result_t protocol_result;
-        ds5_output_sequence_t previous_sequence;
-        int send_result;
+        bool did_work = false;
+        uint8_t newer_report[DS5_USB_OUTPUT_REPORT_SIZE];
 
-        if (!ds5_output_mailbox_receive(usb_report, sizeof(usb_report))) {
-            continue;
+        while (ds5_output_mailbox_try_receive(newer_report,
+                                              sizeof(newer_report))) {
+            memcpy(usb_report, newer_report, sizeof(usb_report));
+            pending_usb_output = true;
+            pending_usb_output_since = xTaskGetTickCount();
+            did_work = true;
         }
 
-        for (wait_count = 0U;
-             ((bluetooth_state != DS5_BT_STATE_READY) ||
-              !interrupt_channel_ready) &&
-             (wait_count < DS5_BT_OUTPUT_READY_WAIT_COUNT);
-             ++wait_count) {
-            uint8_t newer_report[DS5_USB_OUTPUT_REPORT_SIZE];
-
-            if (ds5_output_mailbox_try_receive(newer_report,
-                                               sizeof(newer_report))) {
-                memcpy(usb_report, newer_report, sizeof(usb_report));
+        if (ds5_haptics_mailbox_try_receive(haptics_data,
+                                            sizeof(haptics_data))) {
+            did_work = true;
+            if (ds5_bt_interrupt_ready()) {
+                ds5_bt_forward_haptics(haptics_data, bt_transaction,
+                                       sizeof(bt_transaction));
+            } else {
+                ++discarded_haptics_not_ready;
             }
-            vTaskDelay(pdMS_TO_TICKS(DS5_BT_OUTPUT_READY_WAIT_MS));
         }
 
-        if ((bluetooth_state != DS5_BT_STATE_READY) ||
-            !interrupt_channel_ready) {
-            ++failed_output_reports;
-            if (failed_output_reports <= 4U) {
-                printf("DS5 BT: USB output expired waiting for controller\r\n");
+        if (pending_usb_output) {
+            if (ds5_bt_interrupt_ready()) {
+                ds5_bt_forward_usb_output(usb_report, bt_transaction,
+                                          sizeof(bt_transaction));
+                pending_usb_output = false;
+                did_work = true;
+            } else if ((xTaskGetTickCount() - pending_usb_output_since) >=
+                       pdMS_TO_TICKS(DS5_BT_OUTPUT_READY_TIMEOUT_MS)) {
+                ++failed_output_reports;
+                if (failed_output_reports <= 4U) {
+                    printf("DS5 BT: USB output expired waiting for "
+                           "controller\r\n");
+                }
+                pending_usb_output = false;
             }
-            continue;
         }
 
-        previous_sequence = output_sequence;
-        protocol_result = ds5_build_bt_output_transaction(
-            &output_sequence, usb_report, sizeof(usb_report),
-            bt_transaction, sizeof(bt_transaction), &transaction_length);
-        if (protocol_result != DS5_PROTOCOL_OK) {
-            ++failed_output_reports;
-            if (failed_output_reports <= 4U) {
-                printf("DS5 BT: USB output report rejected (result %d)\r\n",
-                       (int)protocol_result);
-            }
-            continue;
-        }
-
-        send_result = ds5_l2cap_send(DS5_L2CAP_CHANNEL_INTERRUPT,
-                                     bt_transaction, transaction_length);
-        if (send_result < 0) {
-            output_sequence = previous_sequence;
-            ++failed_output_reports;
-            if (failed_output_reports <= 4U) {
-                printf("DS5 BT: HID output send failed (err %d)\r\n",
-                       send_result);
-            }
-            continue;
-        }
-
-        ++transmitted_output_reports;
-        if (transmitted_output_reports == 1U) {
-            printf("DS5 BT: first USB output report forwarded\r\n");
-        } else if ((transmitted_output_reports %
-                    DS5_BT_OUTPUT_LOG_INTERVAL) == 0U) {
-            printf("DS5 BT: output reports forwarded %lu, failed %lu\r\n",
-                   (unsigned long)transmitted_output_reports,
-                   (unsigned long)failed_output_reports);
+        if (!did_work) {
+            vTaskDelay(pdMS_TO_TICKS(DS5_BT_TX_POLL_MS));
         }
     }
 }

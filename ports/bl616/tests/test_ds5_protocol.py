@@ -74,6 +74,40 @@ def build_bt_output(usb_report, sequence):
     return transaction, ((sequence & 0x0F) + 1) & 0x0F
 
 
+def build_bt_haptics(haptics_data, sequence, packet_counter):
+    if len(haptics_data) != CONSTANTS["DS5_HAPTICS_DATA_SIZE"]:
+        raise ValueError("unexpected haptics data length")
+
+    report = bytearray(CONSTANTS["DS5_BT_HAPTICS_REPORT_SIZE"])
+    report[0] = CONSTANTS["DS5_BT_HAPTICS_REPORT_ID"]
+    report[CONSTANTS["DS5_BT_HAPTICS_SEQUENCE_OFFSET"]] = (
+        sequence & 0x0F
+    ) << 4
+    report[2] = CONSTANTS["DS5_BT_HAPTICS_STREAM_FLAGS"]
+    report[3] = CONSTANTS["DS5_BT_HAPTICS_HEADER_LENGTH"]
+    report[4] = CONSTANTS["DS5_BT_HAPTICS_ROUTING"]
+    report[5:9] = bytes([CONSTANTS["DS5_BT_HAPTICS_BUFFER_LENGTH"]]) * 4
+    packet_counter = (packet_counter + 2) & 0xFF
+    report[9] = packet_counter
+    report[10] = CONSTANTS["DS5_BT_HAPTICS_BLOCK_FLAGS"]
+    report[11] = CONSTANTS["DS5_BT_HAPTICS_BLOCK_LENGTH"]
+
+    data_offset = CONSTANTS["DS5_BT_HAPTICS_DATA_OFFSET"]
+    report[data_offset : data_offset + len(haptics_data)] = haptics_data
+    crc_offset = CONSTANTS["DS5_BT_HAPTICS_CRC_OFFSET"]
+    crc = crc32_seeded(report[:crc_offset], 0xEADA2D49)
+    report[crc_offset:] = crc.to_bytes(4, "little")
+
+    transaction = bytes([CONSTANTS["DS5_BT_OUTPUT_TRANSACTION_HEADER"]]) + bytes(
+        report
+    )
+    return (
+        transaction,
+        ((sequence & 0x0F) + 1) & 0x0F,
+        packet_counter,
+    )
+
+
 def build_feature_set(report_id, payload):
     body = bytes([report_id]) + bytes(payload)
     crc = crc32_seeded(body, 0x2060EFC3)
@@ -104,6 +138,19 @@ class Ds5ProtocolContractTests(unittest.TestCase):
             CONSTANTS["DS5_USB_OUTPUT_STATE_OFFSET"]
             + CONSTANTS["DS5_USB_OUTPUT_STATE_SIZE"],
             CONSTANTS["DS5_USB_OUTPUT_REPORT_SIZE"],
+        )
+        self.assertEqual(
+            CONSTANTS["DS5_BT_HAPTICS_REPORT_SIZE"] + 1,
+            CONSTANTS["DS5_BT_HAPTICS_TRANSACTION_SIZE"],
+        )
+        self.assertEqual(
+            CONSTANTS["DS5_BT_HAPTICS_CRC_OFFSET"] + 4,
+            CONSTANTS["DS5_BT_HAPTICS_REPORT_SIZE"],
+        )
+        self.assertLessEqual(
+            CONSTANTS["DS5_BT_HAPTICS_DATA_OFFSET"]
+            + CONSTANTS["DS5_HAPTICS_DATA_SIZE"],
+            CONSTANTS["DS5_BT_HAPTICS_CRC_OFFSET"],
         )
 
     def test_extracts_63_byte_input_payload(self):
@@ -166,6 +213,43 @@ class Ds5ProtocolContractTests(unittest.TestCase):
         report[0] = 0x01
         with self.assertRaises(ValueError):
             build_bt_output(report, 0)
+
+    def test_zero_haptics_report_matches_golden_crc(self):
+        transaction, next_sequence, next_counter = build_bt_haptics(
+            bytes(CONSTANTS["DS5_HAPTICS_DATA_SIZE"]), 0, 0
+        )
+
+        self.assertEqual(len(transaction), 548)
+        self.assertEqual(
+            transaction[:13],
+            bytes.fromhex("a2390091067e4040404002d240"),
+        )
+        self.assertEqual(transaction[-4:], bytes.fromhex("fbb8ff6e"))
+        self.assertEqual(next_sequence, 1)
+        self.assertEqual(next_counter, 2)
+
+    def test_haptics_preserves_samples_and_wraps_counters(self):
+        samples = bytes(range(CONSTANTS["DS5_HAPTICS_DATA_SIZE"]))
+        transaction, next_sequence, next_counter = build_bt_haptics(
+            samples, 0x0F, 0xFE
+        )
+        report_offset = 1
+        data_offset = (
+            report_offset + CONSTANTS["DS5_BT_HAPTICS_DATA_OFFSET"]
+        )
+
+        self.assertEqual(transaction[2], 0xF0)
+        self.assertEqual(
+            transaction[data_offset : data_offset + len(samples)], samples
+        )
+        self.assertEqual(next_sequence, 0)
+        self.assertEqual(next_counter, 0)
+
+    def test_rejects_wrong_haptics_shape(self):
+        with self.assertRaises(ValueError):
+            build_bt_haptics(
+                bytes(CONSTANTS["DS5_HAPTICS_DATA_SIZE"] - 1), 0, 0
+            )
 
     def test_feature_transactions_match_golden_vector(self):
         get_transaction = bytes(

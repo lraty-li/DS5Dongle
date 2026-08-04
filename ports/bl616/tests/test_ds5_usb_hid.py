@@ -72,16 +72,20 @@ class Ds5UsbHidTests(unittest.TestCase):
         )
         self.assertIn("memcpy(&hid_transmit_report[1], payload", source)
 
-    def test_composite_descriptor_keeps_cdc_and_adds_hid(self):
+    def test_composite_descriptor_keeps_cdc_hid_and_adds_audio(self):
         source = USB_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("CDC_ACM_DESCRIPTOR_INIT", source)
         self.assertIn(
-            "USB_CONFIG_DESCRIPTOR_INIT(DS5_USB_CONFIG_SIZE, 0x03", source
+            "USB_CONFIG_DESCRIPTOR_INIT(DS5_USB_CONFIG_SIZE, 0x05", source
         )
         self.assertIn("DS5_USB_HID_INTERFACE_NUMBER", source)
         self.assertIn("DS5_USB_HID_IN_EP", source)
         self.assertIn("DS5_USB_HID_OUT_EP", source)
+        self.assertIn("AUDIO_AC_DESCRIPTOR_INIT", source)
+        self.assertIn("AUDIO_AS_DESCRIPTOR_INIT", source)
+        self.assertIn("DS5_USB_AUDIO_STREAM_INTERFACE", source)
+        self.assertIn("DS5_USB_AUDIO_OUT_EP", source)
         self.assertIn("0x054cU", source)
         self.assertIn("0x0ce6U", source)
         self.assertIn('"DualSense Wireless Controller"', source)

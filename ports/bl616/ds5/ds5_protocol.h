@@ -34,6 +34,20 @@ extern "C" {
 #define DS5_BT_OUTPUT_STATE_OFFSET         3U
 #define DS5_BT_OUTPUT_CRC_OFFSET           74U
 
+#define DS5_HAPTICS_DATA_SIZE              128U
+#define DS5_BT_HAPTICS_TRANSACTION_SIZE    548U
+#define DS5_BT_HAPTICS_REPORT_SIZE         547U
+#define DS5_BT_HAPTICS_REPORT_ID           0x39U
+#define DS5_BT_HAPTICS_SEQUENCE_OFFSET     1U
+#define DS5_BT_HAPTICS_STREAM_FLAGS        0x91U
+#define DS5_BT_HAPTICS_HEADER_LENGTH       0x06U
+#define DS5_BT_HAPTICS_ROUTING             0x7EU
+#define DS5_BT_HAPTICS_BUFFER_LENGTH       64U
+#define DS5_BT_HAPTICS_BLOCK_FLAGS         0xD2U
+#define DS5_BT_HAPTICS_BLOCK_LENGTH        64U
+#define DS5_BT_HAPTICS_DATA_OFFSET         12U
+#define DS5_BT_HAPTICS_CRC_OFFSET          543U
+
 #define DS5_FEATURE_GET_HEADER             0x43U
 #define DS5_FEATURE_GET_TRANSACTION_SIZE   2U
 #define DS5_FEATURE_DATA_HEADER            0xA3U
@@ -68,6 +82,15 @@ ds5_protocol_result_t ds5_build_bt_output_transaction(
     ds5_output_sequence_t *sequence,
     const uint8_t *usb_report,
     size_t usb_report_length,
+    uint8_t *bt_transaction,
+    size_t bt_transaction_capacity,
+    size_t *bt_transaction_length);
+
+ds5_protocol_result_t ds5_build_bt_haptics_transaction(
+    ds5_output_sequence_t *sequence,
+    uint8_t *packet_counter,
+    const uint8_t *haptics_data,
+    size_t haptics_data_length,
     uint8_t *bt_transaction,
     size_t bt_transaction_capacity,
     size_t *bt_transaction_length);
