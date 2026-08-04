@@ -18,8 +18,9 @@ extern "C" {
 #define DS5_BT_INPUT_MIN_SIZE              66U
 
 #define DS5_USB_OUTPUT_REPORT_ID           0x02U
-#define DS5_USB_OUTPUT_REPORT_SIZE         64U
+#define DS5_USB_OUTPUT_REPORT_SIZE         48U
 #define DS5_USB_OUTPUT_STATE_OFFSET        1U
+#define DS5_USB_OUTPUT_STATE_SIZE          47U
 #define DS5_SET_STATE_SIZE                 63U
 
 #define DS5_BT_OUTPUT_TRANSACTION_HEADER   0xA2U

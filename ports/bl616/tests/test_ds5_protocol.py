@@ -61,7 +61,7 @@ def build_bt_output(usb_report, sequence):
     ]
 
     state_offset = CONSTANTS["DS5_BT_OUTPUT_STATE_OFFSET"]
-    state_size = CONSTANTS["DS5_SET_STATE_SIZE"]
+    state_size = CONSTANTS["DS5_USB_OUTPUT_STATE_SIZE"]
     report[state_offset : state_offset + state_size] = usb_report[1:]
 
     crc_offset = CONSTANTS["DS5_BT_OUTPUT_CRC_OFFSET"]
@@ -100,6 +100,11 @@ class Ds5ProtocolContractTests(unittest.TestCase):
             CONSTANTS["DS5_BT_OUTPUT_CRC_OFFSET"] + 4,
             CONSTANTS["DS5_BT_OUTPUT_REPORT_SIZE"],
         )
+        self.assertEqual(
+            CONSTANTS["DS5_USB_OUTPUT_STATE_OFFSET"]
+            + CONSTANTS["DS5_USB_OUTPUT_STATE_SIZE"],
+            CONSTANTS["DS5_USB_OUTPUT_REPORT_SIZE"],
+        )
 
     def test_extracts_63_byte_input_payload(self):
         payload = bytes(range(CONSTANTS["DS5_USB_INPUT_PAYLOAD_SIZE"]))
@@ -130,7 +135,7 @@ class Ds5ProtocolContractTests(unittest.TestCase):
 
     def test_zero_output_report_matches_golden_crc(self):
         usb_report = bytes([CONSTANTS["DS5_USB_OUTPUT_REPORT_ID"]]) + bytes(
-            CONSTANTS["DS5_SET_STATE_SIZE"]
+            CONSTANTS["DS5_USB_OUTPUT_STATE_SIZE"]
         )
         transaction, next_sequence = build_bt_output(usb_report, 0)
 
@@ -140,7 +145,7 @@ class Ds5ProtocolContractTests(unittest.TestCase):
         self.assertEqual(next_sequence, 1)
 
     def test_output_preserves_state_and_wraps_sequence(self):
-        state = bytes(range(CONSTANTS["DS5_SET_STATE_SIZE"]))
+        state = bytes(range(CONSTANTS["DS5_USB_OUTPUT_STATE_SIZE"]))
         usb_report = bytes([CONSTANTS["DS5_USB_OUTPUT_REPORT_ID"]]) + state
         transaction, next_sequence = build_bt_output(usb_report, 0x0F)
 
@@ -148,6 +153,9 @@ class Ds5ProtocolContractTests(unittest.TestCase):
         state_offset = report_offset + CONSTANTS["DS5_BT_OUTPUT_STATE_OFFSET"]
         self.assertEqual(transaction[2], 0xF0)
         self.assertEqual(transaction[state_offset : state_offset + len(state)], state)
+        padding_start = state_offset + len(state)
+        padding_end = state_offset + CONSTANTS["DS5_SET_STATE_SIZE"]
+        self.assertEqual(transaction[padding_start:padding_end], bytes(16))
         self.assertEqual(next_sequence, 0)
 
     def test_rejects_wrong_usb_output_shape(self):

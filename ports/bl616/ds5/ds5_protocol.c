@@ -9,7 +9,7 @@
 _Static_assert(DS5_BT_INPUT_PAYLOAD_OFFSET + DS5_USB_INPUT_PAYLOAD_SIZE ==
                    DS5_BT_INPUT_MIN_SIZE,
                "Bluetooth input report size mismatch");
-_Static_assert(DS5_USB_OUTPUT_STATE_OFFSET + DS5_SET_STATE_SIZE ==
+_Static_assert(DS5_USB_OUTPUT_STATE_OFFSET + DS5_USB_OUTPUT_STATE_SIZE ==
                    DS5_USB_OUTPUT_REPORT_SIZE,
                "USB output report size mismatch");
 _Static_assert(DS5_BT_OUTPUT_REPORT_OFFSET + DS5_BT_OUTPUT_REPORT_SIZE ==
@@ -133,7 +133,7 @@ ds5_protocol_result_t ds5_build_bt_output_transaction(
     bt_report[DS5_BT_OUTPUT_TAG_OFFSET] = DS5_BT_OUTPUT_TAG;
     memcpy(&bt_report[DS5_BT_OUTPUT_STATE_OFFSET],
            &usb_report[DS5_USB_OUTPUT_STATE_OFFSET],
-           DS5_SET_STATE_SIZE);
+           DS5_USB_OUTPUT_STATE_SIZE);
 
     crc = ds5_crc32_seeded(bt_report, DS5_BT_OUTPUT_CRC_OFFSET,
                            DS5_OUTPUT_CRC32_SEED);

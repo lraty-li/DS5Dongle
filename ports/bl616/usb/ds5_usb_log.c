@@ -19,8 +19,8 @@
 #define DS5_USB_CDC_IN_EP       0x83U
 #define DS5_USB_CDC_OUT_EP      0x04U
 #define DS5_USB_CDC_INT_EP      0x85U
-#define DS5_USB_VID             0xffffU
-#define DS5_USB_PID             0xffffU
+#define DS5_USB_VID             0x054cU
+#define DS5_USB_PID             0x0ce6U
 #define DS5_USB_MAX_POWER_MA    100U
 #define DS5_USB_CDC_MPS         512U
 #define DS5_USB_CONFIG_SIZE     \
@@ -44,7 +44,7 @@ static const uint8_t config_descriptor[] = {
     USB_DESCRIPTOR_TYPE_INTERFACE,
     DS5_USB_HID_INTERFACE_NUMBER,
     0x00,
-    0x01,
+    0x02,
     0x03,
     0x00,
     0x00,
@@ -61,8 +61,15 @@ static const uint8_t config_descriptor[] = {
     USB_DESCRIPTOR_TYPE_ENDPOINT,
     DS5_USB_HID_IN_EP,
     0x03,
-    (uint8_t)(DS5_USB_HID_IN_REPORT_SIZE & 0xffU),
-    (uint8_t)(DS5_USB_HID_IN_REPORT_SIZE >> 8U),
+    (uint8_t)(DS5_USB_HID_ENDPOINT_MPS & 0xffU),
+    (uint8_t)(DS5_USB_HID_ENDPOINT_MPS >> 8U),
+    DS5_USB_HID_POLL_INTERVAL,
+    0x07,
+    USB_DESCRIPTOR_TYPE_ENDPOINT,
+    DS5_USB_HID_OUT_EP,
+    0x03,
+    (uint8_t)(DS5_USB_HID_ENDPOINT_MPS & 0xffU),
+    (uint8_t)(DS5_USB_HID_ENDPOINT_MPS >> 8U),
     DS5_USB_HID_POLL_INTERVAL,
 };
 
@@ -75,8 +82,8 @@ static const uint8_t device_qualifier_descriptor[] = {
 
 static const char *string_descriptors[] = {
     (const char[]){ 0x09, 0x04 },
-    "DS5Dongle",
-    "DS5Dongle BL616 HID Bridge",
+    "Sony Interactive Entertainment",
+    "DualSense Wireless Controller",
     "BL616-LOG-0001",
 };
 

@@ -9,8 +9,10 @@ target_sources(app PRIVATE
     bluetooth/ds5_bt_policy.c
     bluetooth/ds5_l2cap.c
     debug/ds5_log.c
+    ds5/ds5_feature_cache.c
     ds5/ds5_protocol.c
     platform/ds5_input_mailbox.c
+    platform/ds5_output_mailbox.c
     usb/ds5_usb_hid.c
     usb/ds5_usb_log.c
 )

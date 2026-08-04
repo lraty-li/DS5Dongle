@@ -16,8 +16,10 @@
 #include "hci_err.h"
 
 #include "ds5_bt_policy.h"
+#include "ds5_feature_cache.h"
 #include "ds5_l2cap.h"
 #include "ds5_input_mailbox.h"
+#include "ds5_output_mailbox.h"
 #include "ds5_protocol.h"
 #include "ds5_log.h"
 
@@ -27,7 +29,18 @@
 #define DS5_BT_DISCOVERY_LENGTH       0x05U
 #define DS5_BT_CANDIDATE_NAME_SIZE    64U
 #define DS5_BT_WORKER_STACK_DEPTH     (configMINIMAL_STACK_SIZE * 4U)
+#define DS5_BT_TX_WORKER_STACK_DEPTH  (configMINIMAL_STACK_SIZE * 4U)
 #define DS5_BT_INPUT_LOG_INTERVAL     1024U
+#define DS5_BT_OUTPUT_LOG_INTERVAL    256U
+#define DS5_BT_OUTPUT_READY_WAIT_MS    20U
+#define DS5_BT_OUTPUT_READY_WAIT_COUNT 250U
+
+static const uint8_t feature_prefetch_ids[] = {
+    0x05U,
+    0x09U,
+    0x20U,
+    0x22U,
+};
 
 typedef struct {
     bool valid;
@@ -55,15 +68,19 @@ static volatile ds5_bt_state_t bluetooth_state = DS5_BT_STATE_OFF;
 static bool outgoing_acl;
 static bool control_channel_ready;
 static bool interrupt_channel_ready;
-static bool enhanced_input_requested;
 static bool calibration_response_received;
+static bool feature_request_pending;
+static size_t feature_prefetch_index;
 static volatile uint32_t received_l2cap_packets;
 static uint32_t received_control_packets;
 static uint32_t received_interrupt_packets;
 static uint32_t valid_input_reports;
 static uint32_t invalid_input_reports;
 static uint32_t input_mailbox_publish_failures;
+static uint32_t transmitted_output_reports;
+static uint32_t failed_output_reports;
 static uint8_t latest_usb_input_payload[DS5_USB_INPUT_PAYLOAD_SIZE];
+static ds5_output_sequence_t output_sequence;
 
 static const struct bt_br_discovery_param discovery_param = {
     .length = DS5_BT_DISCOVERY_LENGTH,
@@ -73,6 +90,9 @@ static const struct bt_br_discovery_param discovery_param = {
 static StaticTask_t worker_task_storage;
 static StackType_t worker_task_stack[DS5_BT_WORKER_STACK_DEPTH];
 static TaskHandle_t worker_task;
+static StaticTask_t tx_worker_task_storage;
+static StackType_t tx_worker_task_stack[DS5_BT_TX_WORKER_STACK_DEPTH];
+static TaskHandle_t tx_worker_task;
 
 static const char *ds5_bt_state_name(ds5_bt_state_t state)
 {
@@ -160,8 +180,10 @@ static void ds5_bt_reset_link_state(void)
     outgoing_acl = false;
     control_channel_ready = false;
     interrupt_channel_ready = false;
-    enhanced_input_requested = false;
     calibration_response_received = false;
+    feature_request_pending = false;
+    feature_prefetch_index = 0U;
+    ds5_output_sequence_reset(&output_sequence, 0U);
 }
 
 static void ds5_bt_return_to_candidate(void)
@@ -477,19 +499,23 @@ static void ds5_bt_discovery_complete(struct bt_br_discovery_result *results,
     }
 }
 
-static int ds5_bt_request_enhanced_input(void)
+static int ds5_bt_request_next_feature(void)
 {
     uint8_t transaction[DS5_FEATURE_GET_TRANSACTION_SIZE];
+    uint8_t report_id;
     size_t transaction_length;
     ds5_protocol_result_t protocol_result;
     int err;
 
-    if (enhanced_input_requested) {
+    if (!control_channel_ready || feature_request_pending ||
+        (feature_prefetch_index >=
+         (sizeof(feature_prefetch_ids) / sizeof(feature_prefetch_ids[0])))) {
         return 0;
     }
 
+    report_id = feature_prefetch_ids[feature_prefetch_index];
     protocol_result = ds5_build_feature_get_transaction(
-        DS5_FEATURE_CALIBRATION_REPORT_ID,
+        report_id,
         transaction, sizeof(transaction), &transaction_length);
     if (protocol_result != DS5_PROTOCOL_OK) {
         return (int)protocol_result;
@@ -501,9 +527,12 @@ static int ds5_bt_request_enhanced_input(void)
         return err;
     }
 
-    enhanced_input_requested = true;
-    printf("DS5 BT: calibration Feature 0x05 requested for "
-           "extended input mode\r\n");
+    feature_request_pending = true;
+    printf("DS5 BT: Feature 0x%02x requested (%u/%u)\r\n",
+           (unsigned int)report_id,
+           (unsigned int)(feature_prefetch_index + 1U),
+           (unsigned int)(sizeof(feature_prefetch_ids) /
+                          sizeof(feature_prefetch_ids[0])));
     return 0;
 }
 
@@ -523,10 +552,10 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
 
         if (control_channel_ready && interrupt_channel_ready &&
             (active_connection != NULL)) {
-            int request_err = ds5_bt_request_enhanced_input();
+            int request_err = ds5_bt_request_next_feature();
 
             if (request_err != 0) {
-                printf("DS5 BT: calibration Feature request failed "
+                printf("DS5 BT: Feature prefetch request failed "
                        "(err %d)\r\n",
                        request_err);
             }
@@ -548,16 +577,43 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
     case DS5_L2CAP_EVENT_DATA:
         ++received_l2cap_packets;
         if (event->channel == DS5_L2CAP_CHANNEL_CONTROL) {
+            uint8_t report_id;
+
             ++received_control_packets;
             if ((event->length >= 2U) &&
-                (event->data[0] == DS5_FEATURE_DATA_HEADER) &&
-                (event->data[1] == DS5_FEATURE_CALIBRATION_REPORT_ID)) {
-                if (!calibration_response_received) {
+                (event->data[0] == DS5_FEATURE_DATA_HEADER)) {
+                report_id = event->data[1];
+                if (ds5_feature_cache_store(report_id, &event->data[2],
+                                            event->length - 2U)) {
+                    printf("DS5 BT: Feature 0x%02x cached (length %u)\r\n",
+                           (unsigned int)report_id,
+                           (unsigned int)(event->length - 2U));
+                }
+
+                if ((report_id == DS5_FEATURE_CALIBRATION_REPORT_ID) &&
+                    !calibration_response_received) {
                     printf("DS5 BT: calibration Feature 0x05 response "
                            "received (length %u)\r\n",
                            (unsigned int)event->length);
+                    calibration_response_received = true;
                 }
-                calibration_response_received = true;
+
+                if (feature_request_pending &&
+                    (feature_prefetch_index <
+                     (sizeof(feature_prefetch_ids) /
+                      sizeof(feature_prefetch_ids[0]))) &&
+                    (report_id == feature_prefetch_ids[feature_prefetch_index])) {
+                    int request_err;
+
+                    feature_request_pending = false;
+                    ++feature_prefetch_index;
+                    request_err = ds5_bt_request_next_feature();
+                    if (request_err != 0) {
+                        printf("DS5 BT: Feature prefetch request failed "
+                               "(err %d)\r\n",
+                               request_err);
+                    }
+                }
             } else if (received_control_packets <= 4U) {
                 if (event->length >= 2U) {
                     printf("DS5 BT: unhandled HID Control packet "
@@ -651,18 +707,107 @@ static void ds5_bt_worker(void *parameter)
     }
 }
 
+static void ds5_bt_tx_worker(void *parameter)
+{
+    uint8_t usb_report[DS5_USB_OUTPUT_REPORT_SIZE];
+    uint8_t bt_transaction[DS5_BT_OUTPUT_TRANSACTION_SIZE];
+
+    (void)parameter;
+
+    while (1) {
+        uint32_t wait_count;
+        size_t transaction_length;
+        ds5_protocol_result_t protocol_result;
+        ds5_output_sequence_t previous_sequence;
+        int send_result;
+
+        if (!ds5_output_mailbox_receive(usb_report, sizeof(usb_report))) {
+            continue;
+        }
+
+        for (wait_count = 0U;
+             ((bluetooth_state != DS5_BT_STATE_READY) ||
+              !interrupt_channel_ready) &&
+             (wait_count < DS5_BT_OUTPUT_READY_WAIT_COUNT);
+             ++wait_count) {
+            uint8_t newer_report[DS5_USB_OUTPUT_REPORT_SIZE];
+
+            if (ds5_output_mailbox_try_receive(newer_report,
+                                               sizeof(newer_report))) {
+                memcpy(usb_report, newer_report, sizeof(usb_report));
+            }
+            vTaskDelay(pdMS_TO_TICKS(DS5_BT_OUTPUT_READY_WAIT_MS));
+        }
+
+        if ((bluetooth_state != DS5_BT_STATE_READY) ||
+            !interrupt_channel_ready) {
+            ++failed_output_reports;
+            if (failed_output_reports <= 4U) {
+                printf("DS5 BT: USB output expired waiting for controller\r\n");
+            }
+            continue;
+        }
+
+        previous_sequence = output_sequence;
+        protocol_result = ds5_build_bt_output_transaction(
+            &output_sequence, usb_report, sizeof(usb_report),
+            bt_transaction, sizeof(bt_transaction), &transaction_length);
+        if (protocol_result != DS5_PROTOCOL_OK) {
+            ++failed_output_reports;
+            if (failed_output_reports <= 4U) {
+                printf("DS5 BT: USB output report rejected (result %d)\r\n",
+                       (int)protocol_result);
+            }
+            continue;
+        }
+
+        send_result = ds5_l2cap_send(DS5_L2CAP_CHANNEL_INTERRUPT,
+                                     bt_transaction, transaction_length);
+        if (send_result < 0) {
+            output_sequence = previous_sequence;
+            ++failed_output_reports;
+            if (failed_output_reports <= 4U) {
+                printf("DS5 BT: HID output send failed (err %d)\r\n",
+                       send_result);
+            }
+            continue;
+        }
+
+        ++transmitted_output_reports;
+        if (transmitted_output_reports == 1U) {
+            printf("DS5 BT: first USB output report forwarded\r\n");
+        } else if ((transmitted_output_reports %
+                    DS5_BT_OUTPUT_LOG_INTERVAL) == 0U) {
+            printf("DS5 BT: output reports forwarded %lu, failed %lu\r\n",
+                   (unsigned long)transmitted_output_reports,
+                   (unsigned long)failed_output_reports);
+        }
+    }
+}
+
 static int ds5_bt_start_worker(void)
 {
-    if (worker_task != NULL) {
+    if ((worker_task != NULL) && (tx_worker_task != NULL)) {
         return 0;
     }
 
-    worker_task = xTaskCreateStatic(ds5_bt_worker, "ds5_bt_worker",
-                                    DS5_BT_WORKER_STACK_DEPTH, NULL,
-                                    configMAX_PRIORITIES - 5U,
-                                    worker_task_stack,
-                                    &worker_task_storage);
-    return worker_task != NULL ? 0 : -ENOMEM;
+    if (worker_task == NULL) {
+        worker_task = xTaskCreateStatic(ds5_bt_worker, "ds5_bt_worker",
+                                        DS5_BT_WORKER_STACK_DEPTH, NULL,
+                                        configMAX_PRIORITIES - 5U,
+                                        worker_task_stack,
+                                        &worker_task_storage);
+        if (worker_task == NULL) {
+            return -ENOMEM;
+        }
+    }
+
+    tx_worker_task = xTaskCreateStatic(ds5_bt_tx_worker, "ds5_bt_tx",
+                                       DS5_BT_TX_WORKER_STACK_DEPTH, NULL,
+                                       configMAX_PRIORITIES - 5U,
+                                       tx_worker_task_stack,
+                                       &tx_worker_task_storage);
+    return tx_worker_task != NULL ? 0 : -ENOMEM;
 }
 
 static void ds5_bt_ready(int err)
@@ -848,6 +993,8 @@ int ds5_bt_clear_pairing(void)
                err);
         return err;
     }
+
+    ds5_feature_cache_clear();
 
     connectable_err = bt_br_set_connectable(false);
     if (connectable_err != 0) {
