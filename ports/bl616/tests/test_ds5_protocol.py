@@ -33,6 +33,8 @@ def crc32_seeded(data, seed):
 def extract_usb_input(bt_transaction):
     if len(bt_transaction) < CONSTANTS["DS5_BT_INPUT_MIN_SIZE"]:
         raise ValueError("short Bluetooth input transaction")
+    if bt_transaction[0] != CONSTANTS["DS5_BT_INPUT_TRANSACTION_HEADER"]:
+        raise ValueError("unexpected Bluetooth HID transaction header")
     if (
         bt_transaction[CONSTANTS["DS5_BT_INPUT_REPORT_ID_OFFSET"]]
         != CONSTANTS["DS5_BT_INPUT_REPORT_ID"]
@@ -101,14 +103,27 @@ class Ds5ProtocolContractTests(unittest.TestCase):
 
     def test_extracts_63_byte_input_payload(self):
         payload = bytes(range(CONSTANTS["DS5_USB_INPUT_PAYLOAD_SIZE"]))
-        packet = bytes([0x00, CONSTANTS["DS5_BT_INPUT_REPORT_ID"], 0x7F]) + payload
+        packet = bytes(
+            [
+                CONSTANTS["DS5_BT_INPUT_TRANSACTION_HEADER"],
+                CONSTANTS["DS5_BT_INPUT_REPORT_ID"],
+                0x7F,
+            ]
+        ) + payload
         self.assertEqual(extract_usb_input(packet), payload)
 
-    def test_rejects_short_or_wrong_input_report(self):
+    def test_rejects_short_or_wrong_input_header_or_report(self):
         with self.assertRaises(ValueError):
             extract_usb_input(bytes(CONSTANTS["DS5_BT_INPUT_MIN_SIZE"] - 1))
 
         packet = bytearray(CONSTANTS["DS5_BT_INPUT_MIN_SIZE"])
+        packet[CONSTANTS["DS5_BT_INPUT_REPORT_ID_OFFSET"]] = CONSTANTS[
+            "DS5_BT_INPUT_REPORT_ID"
+        ]
+        with self.assertRaises(ValueError):
+            extract_usb_input(packet)
+
+        packet[0] = CONSTANTS["DS5_BT_INPUT_TRANSACTION_HEADER"]
         packet[CONSTANTS["DS5_BT_INPUT_REPORT_ID_OFFSET"]] = 0x30
         with self.assertRaises(ValueError):
             extract_usb_input(packet)

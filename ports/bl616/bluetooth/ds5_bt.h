@@ -21,6 +21,7 @@ typedef enum {
 } ds5_bt_state_t;
 
 int ds5_bt_init(void);
+int ds5_bt_start_discovery(void);
 bool ds5_bt_candidate_available(void);
 int ds5_bt_connect_candidate(void);
 int ds5_bt_disconnect(void);

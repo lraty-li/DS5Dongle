@@ -74,6 +74,10 @@ ds5_protocol_result_t ds5_extract_usb_input_payload(
         return DS5_PROTOCOL_ERROR_CAPACITY;
     }
 
+    if (bt_transaction[0] != DS5_BT_INPUT_TRANSACTION_HEADER) {
+        return DS5_PROTOCOL_ERROR_TRANSACTION_HEADER;
+    }
+
     if (bt_transaction[DS5_BT_INPUT_REPORT_ID_OFFSET] !=
         DS5_BT_INPUT_REPORT_ID) {
         return DS5_PROTOCOL_ERROR_REPORT_ID;

@@ -8,11 +8,12 @@
 #include "ds5_log.h"
 #include "ds5_usb_log.h"
 
-#define DS5_BT_DISCOVERY_WAIT_MS 20000U
+#define DS5_BT_STATE_POLL_MS       50U
+#define DS5_BT_DISCOVERY_RETRY_MS  750U
+#define DS5_BT_CONNECTION_RETRY_MS 1000U
 
 static void app_start_task(void *parameter)
 {
-    TickType_t discovery_wait_start;
     ds5_bt_state_t bluetooth_state;
     int err;
 
@@ -36,36 +37,45 @@ static void app_start_task(void *parameter)
         ds5_log_printf("DS5 USB: CDC diagnostic interface initialized\r\n");
     }
 
-    discovery_wait_start = xTaskGetTickCount();
-    do {
+    while (1) {
         bluetooth_state = ds5_bt_get_state();
-        if ((bluetooth_state == DS5_BT_STATE_CANDIDATE_READY) ||
-            (bluetooth_state == DS5_BT_STATE_IDLE)) {
-            break;
+        if (bluetooth_state == DS5_BT_STATE_CANDIDATE_READY) {
+            err = ds5_bt_connect_candidate();
+            if (err != 0) {
+                ds5_log_printf(
+                    "DS5: candidate ACL connection failed to start "
+                    "(err %d)\r\n",
+                    err);
+                vTaskDelay(pdMS_TO_TICKS(DS5_BT_CONNECTION_RETRY_MS));
+            } else {
+                ds5_log_printf("DS5: candidate ACL connection started\r\n");
+            }
+            continue;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50U));
-    } while ((xTaskGetTickCount() - discovery_wait_start) <
-             pdMS_TO_TICKS(DS5_BT_DISCOVERY_WAIT_MS));
+        if (bluetooth_state == DS5_BT_STATE_IDLE) {
+            ds5_log_printf("DS5: no candidate; discovery will retry\r\n");
 
-    if (ds5_bt_get_state() == DS5_BT_STATE_CANDIDATE_READY) {
-        err = ds5_bt_connect_candidate();
-        if (err != 0) {
-            ds5_log_printf("DS5: candidate ACL connection failed to start "
-                           "(err %d)\r\n",
-                           err);
-        } else {
-            ds5_log_printf("DS5: candidate ACL connection started\r\n");
+            /*
+             * The pinned SDK clears its discovery callback/result pointers
+             * immediately after the completion callback returns. Delay the
+             * restart so it cannot overwrite that cleanup in hci_core.c.
+             */
+            vTaskDelay(pdMS_TO_TICKS(DS5_BT_DISCOVERY_RETRY_MS));
+            if (ds5_bt_get_state() != DS5_BT_STATE_IDLE) {
+                continue;
+            }
+
+            err = ds5_bt_start_discovery();
+            if (err != 0) {
+                ds5_log_printf("DS5: discovery retry failed (err %d)\r\n",
+                               err);
+            }
+            continue;
         }
-    } else if (ds5_bt_get_state() == DS5_BT_STATE_IDLE) {
-        ds5_log_printf("DS5: discovery completed without a connectable "
-                       "candidate\r\n");
-    } else {
-        ds5_log_printf("DS5: timed out waiting for discovery (state %u)\r\n",
-                       (unsigned int)ds5_bt_get_state());
+
+        vTaskDelay(pdMS_TO_TICKS(DS5_BT_STATE_POLL_MS));
     }
-
-    vTaskDelete(NULL);
 }
 
 int main(void)

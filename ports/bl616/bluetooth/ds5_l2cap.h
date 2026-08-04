@@ -45,7 +45,8 @@ int ds5_l2cap_disconnect(void);
 
 /*
  * Allocate and send from task context. The SDK takes ownership of its net_buf
- * only after bt_l2cap_chan_send accepts the packet.
+ * only after bt_l2cap_chan_send accepts the packet. Returns a non-negative
+ * byte count on success, matching the pinned SDK, or a negative error code.
  */
 int ds5_l2cap_send(ds5_l2cap_channel_t channel, const uint8_t *data,
                    size_t length);

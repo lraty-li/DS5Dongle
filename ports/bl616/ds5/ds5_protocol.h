@@ -11,6 +11,7 @@ extern "C" {
 #define DS5_USB_INPUT_REPORT_ID            0x01U
 #define DS5_USB_INPUT_PAYLOAD_SIZE         63U
 
+#define DS5_BT_INPUT_TRANSACTION_HEADER    0xA1U
 #define DS5_BT_INPUT_REPORT_ID             0x31U
 #define DS5_BT_INPUT_REPORT_ID_OFFSET      1U
 #define DS5_BT_INPUT_PAYLOAD_OFFSET        3U
@@ -34,6 +35,8 @@ extern "C" {
 
 #define DS5_FEATURE_GET_HEADER             0x43U
 #define DS5_FEATURE_GET_TRANSACTION_SIZE   2U
+#define DS5_FEATURE_DATA_HEADER            0xA3U
+#define DS5_FEATURE_CALIBRATION_REPORT_ID  0x05U
 #define DS5_FEATURE_SET_HEADER             0x53U
 #define DS5_FEATURE_CRC_SIZE               4U
 #define DS5_FEATURE_SET_OVERHEAD           6U
@@ -44,6 +47,7 @@ typedef enum {
     DS5_PROTOCOL_ERROR_LENGTH = -2,
     DS5_PROTOCOL_ERROR_REPORT_ID = -3,
     DS5_PROTOCOL_ERROR_CAPACITY = -4,
+    DS5_PROTOCOL_ERROR_TRANSACTION_HEADER = -5,
 } ds5_protocol_result_t;
 
 typedef struct {
