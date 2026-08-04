@@ -11,8 +11,12 @@
 static void app_start_task(void *parameter)
 {
     int err;
+    int rf_err;
 
     (void)parameter;
+
+    /* The pinned SDK initializes RF/PLL state before starting USB. */
+    rf_err = rfparam_init(0U, NULL, 0U);
 
     err = ds5_usb_log_init();
     if (err != 0) {
@@ -22,7 +26,7 @@ static void app_start_task(void *parameter)
         ds5_log_printf("DS5 USB: CDC diagnostic interface initialized\r\n");
     }
 
-    if (rfparam_init(0U, NULL, 0U) != 0) {
+    if (rf_err != 0) {
         ds5_log_printf("DS5: PHY RF initialization failed\r\n");
         vTaskDelete(NULL);
         return;
