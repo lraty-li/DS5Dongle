@@ -17,6 +17,9 @@
 
 #include "ds5_bt_policy.h"
 #include "ds5_l2cap.h"
+#include "ds5_log.h"
+
+#define printf ds5_log_printf
 
 #define DS5_BT_DISCOVERY_RESULT_COUNT 10U
 #define DS5_BT_DISCOVERY_LENGTH       0x05U
