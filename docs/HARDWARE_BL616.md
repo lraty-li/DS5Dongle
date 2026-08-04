@@ -37,6 +37,21 @@ Board-level compatibility has not yet been confirmed.
   enumeration while the board is explicitly placed in download mode before
   drawing conclusions about the connector or cable.
 
+## Download-mode verification (2026-08-04)
+
+- Holding BOOT while reconnecting Type-C exposes `USB Serial Device (COM3)` as
+  `USB\VID_349B&PID_6160` on the current Windows host.
+- The pinned SDK `BLFlashCommand.exe` completed a read-only BootROM handshake
+  on COM3 at 2,000,000 baud and identified BL616 chip revision A0.
+- Flash JEDEC ID: `c86016`.
+- Detected flash capacity: `0x00400000` bytes (4 MiB), matching the temporary
+  `bl616dk` partition baseline.
+- A 256-byte read at flash offset zero succeeded. No flash erase or write was
+  performed during this probe.
+- This confirms that the Type-C data path exposes a UART-compatible download
+  port in BOOT mode. It does not yet prove that BL616 native USB D+/D- is wired
+  to the connector.
+
 ## SDK baseline pending board verification
 
 The pinned `bl616dk` BSP configures its console as UART0 TX on GPIO21 and RX on
@@ -46,7 +61,6 @@ an onboard USB-to-UART bridge.
 
 ## Still to verify
 
-- Flash capacity
 - USB D+ and D- connection
 - Whether Type-C is connected directly to BL616 USB
 - Debug UART TX/RX pins
