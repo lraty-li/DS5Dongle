@@ -26,7 +26,25 @@ for the firmware configuration.
 This is currently used only because the SDK example builds successfully.
 Board-level compatibility has not yet been confirmed.
 
-## To verify after delivery
+## First host enumeration (2026-08-04)
+
+- The board is physically available and connected to the Windows host by its
+  Type-C connector.
+- Windows currently exposes no new COM port and no present unknown/error USB
+  device. The only serial port is the motherboard ACPI `COM1`, so it must not
+  be selected as the board's flashing port.
+- Native USB data connectivity is therefore still unconfirmed. Repeat the
+  enumeration while the board is explicitly placed in download mode before
+  drawing conclusions about the connector or cable.
+
+## SDK baseline pending board verification
+
+The pinned `bl616dk` BSP configures its console as UART0 TX on GPIO21 and RX on
+GPIO22, 8-N-1 at 2,000,000 baud. These are SDK baseline values only; the board
+layout has not yet confirmed that either signal reaches the Type-C connector or
+an onboard USB-to-UART bridge.
+
+## Still to verify
 
 - Flash capacity
 - USB D+ and D- connection
