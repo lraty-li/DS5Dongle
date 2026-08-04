@@ -6,3 +6,4 @@ example
 .DS_Store
 .cache
 /tools/__pycache__
+**/*.pyc

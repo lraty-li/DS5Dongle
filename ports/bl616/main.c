@@ -7,6 +7,7 @@
 #include "rfparam_adapter.h"
 
 #include "ds5_bt.h"
+#include "ds5_input_mailbox.h"
 #include "ds5_log.h"
 #include "ds5_usb_log.h"
 
@@ -33,10 +34,10 @@ static void app_start_task(void *parameter)
 
     err = ds5_usb_log_init();
     if (err != 0) {
-        ds5_log_printf("DS5 USB: CDC log initialization failed (err %d)\r\n",
+        ds5_log_printf("DS5 USB: CDC/HID initialization failed (err %d)\r\n",
                        err);
     } else {
-        ds5_log_printf("DS5 USB: CDC diagnostic interface initialized\r\n");
+        ds5_log_printf("DS5 USB: CDC/HID composite initialized\r\n");
     }
 
     while (1) {
@@ -52,6 +53,11 @@ static void app_start_task(void *parameter)
             } else {
                 ds5_log_printf("DS5: candidate ACL connection started\r\n");
             }
+            continue;
+        }
+
+        if (bluetooth_state == DS5_BT_STATE_RECONNECT_WAIT) {
+            vTaskDelay(pdMS_TO_TICKS(DS5_BT_STATE_POLL_MS));
             continue;
         }
 
@@ -84,14 +90,23 @@ int main(void)
 {
     BaseType_t task_result;
     EfErrCode storage_err;
+    int mailbox_err;
     int rf_err;
 
     board_init();
     ds5_log_init();
 
-    ds5_log_printf("DS5Dongle BL616 BR/EDR connection bring-up\r\n");
+    ds5_log_printf("DS5Dongle BL616 HID bridge bring-up\r\n");
 
     configASSERT(configMAX_PRIORITIES > 5U);
+
+    mailbox_err = ds5_input_mailbox_init();
+    if (mailbox_err != 0) {
+        ds5_log_printf("DS5: input mailbox initialization failed "
+                       "(err %d)\r\n",
+                       mailbox_err);
+        return 0;
+    }
 
     /* Match the pinned SDK btble_cli persistent-settings initialization. */
     bflb_mtd_init();

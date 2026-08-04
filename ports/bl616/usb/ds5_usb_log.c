@@ -10,8 +10,10 @@
 
 #include "usbd_core.h"
 #include "usbd_cdc_acm.h"
+#include "usbd_hid.h"
 
 #include "ds5_log.h"
+#include "ds5_usb_hid.h"
 
 #define DS5_USB_BUS_ID          0U
 #define DS5_USB_CDC_IN_EP       0x83U
@@ -21,7 +23,8 @@
 #define DS5_USB_PID             0xffffU
 #define DS5_USB_MAX_POWER_MA    100U
 #define DS5_USB_CDC_MPS         512U
-#define DS5_USB_CONFIG_SIZE     (9U + CDC_ACM_DESCRIPTOR_LEN)
+#define DS5_USB_CONFIG_SIZE     \
+    (9U + CDC_ACM_DESCRIPTOR_LEN + DS5_USB_HID_CONFIG_DESCRIPTOR_SIZE)
 #define DS5_USB_LOG_STACK_DEPTH (configMINIMAL_STACK_SIZE * 4U)
 #define DS5_USB_LOG_PRIORITY    (configMAX_PRIORITIES - 4U)
 
@@ -31,28 +34,49 @@ static const uint8_t device_descriptor[] = {
 };
 
 static const uint8_t config_descriptor[] = {
-    USB_CONFIG_DESCRIPTOR_INIT(DS5_USB_CONFIG_SIZE, 0x02, 0x01,
+    USB_CONFIG_DESCRIPTOR_INIT(DS5_USB_CONFIG_SIZE, 0x03, 0x01,
                                USB_CONFIG_BUS_POWERED,
                                DS5_USB_MAX_POWER_MA),
     CDC_ACM_DESCRIPTOR_INIT(0x00, DS5_USB_CDC_INT_EP,
                             DS5_USB_CDC_OUT_EP, DS5_USB_CDC_IN_EP,
-                            DS5_USB_CDC_MPS, 0x02)
+                            DS5_USB_CDC_MPS, 0x02),
+    0x09,
+    USB_DESCRIPTOR_TYPE_INTERFACE,
+    DS5_USB_HID_INTERFACE_NUMBER,
+    0x00,
+    0x01,
+    0x03,
+    0x00,
+    0x00,
+    0x00,
+    0x09,
+    HID_DESCRIPTOR_TYPE_HID,
+    0x11, 0x01,
+    0x00,
+    0x01,
+    HID_DESCRIPTOR_TYPE_HID_REPORT,
+    (uint8_t)(DS5_USB_HID_REPORT_DESCRIPTOR_SIZE & 0xffU),
+    (uint8_t)(DS5_USB_HID_REPORT_DESCRIPTOR_SIZE >> 8U),
+    0x07,
+    USB_DESCRIPTOR_TYPE_ENDPOINT,
+    DS5_USB_HID_IN_EP,
+    0x03,
+    (uint8_t)(DS5_USB_HID_IN_REPORT_SIZE & 0xffU),
+    (uint8_t)(DS5_USB_HID_IN_REPORT_SIZE >> 8U),
+    DS5_USB_HID_POLL_INTERVAL,
 };
 
+_Static_assert(sizeof(config_descriptor) == DS5_USB_CONFIG_SIZE,
+               "CDC/HID configuration descriptor size mismatch");
+
 static const uint8_t device_qualifier_descriptor[] = {
-    0x0a,
-    USB_DESCRIPTOR_TYPE_DEVICE_QUALIFIER,
-    0x00, 0x02,
-    0x00, 0x00, 0x00,
-    0x40,
-    0x00,
-    0x00,
+    USB_DEVICE_QUALIFIER_DESCRIPTOR_INIT(USB_2_0, 0xef, 0x02, 0x01, 0x01)
 };
 
 static const char *string_descriptors[] = {
     (const char[]){ 0x09, 0x04 },
     "DS5Dongle",
-    "DS5Dongle BL616 Diagnostic Log",
+    "DS5Dongle BL616 HID Bridge",
     "BL616-LOG-0001",
 };
 
@@ -131,7 +155,7 @@ static void ds5_usb_log_notify(void)
 
 static void ds5_usb_event_handler(uint8_t busid, uint8_t event)
 {
-    (void)busid;
+    ds5_usb_hid_handle_event(busid, event);
 
     switch (event) {
     case USBD_EVENT_RESET:
@@ -312,16 +336,23 @@ int ds5_usb_log_init(void)
     usbd_add_endpoint(DS5_USB_BUS_ID, &cdc_out_endpoint);
     usbd_add_endpoint(DS5_USB_BUS_ID, &cdc_in_endpoint);
 
+    err = ds5_usb_hid_init(DS5_USB_BUS_ID);
+    if (err != 0) {
+        return err;
+    }
+
     log_task = xTaskCreateStatic(ds5_usb_log_task, "usb_log",
                                  DS5_USB_LOG_STACK_DEPTH, NULL,
                                  DS5_USB_LOG_PRIORITY, log_task_stack,
                                  &log_task_storage);
     if (log_task == NULL) {
+        ds5_usb_hid_deinit();
         return -1;
     }
 
     err = usbd_initialize(DS5_USB_BUS_ID, 0U, ds5_usb_event_handler);
     if (err != 0) {
+        ds5_usb_hid_deinit();
         vTaskDelete(log_task);
         log_task = NULL;
         return err;

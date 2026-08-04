@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.15)
 
 find_package(bouffalo_sdk REQUIRED HINTS $ENV{BL_SDK_BASE})
 
-sdk_add_include_directories(. bluetooth config debug ds5 usb)
+sdk_add_include_directories(. bluetooth config debug ds5 platform usb)
 
 target_sources(app PRIVATE
     bluetooth/ds5_bt.c
@@ -10,6 +10,8 @@ target_sources(app PRIVATE
     bluetooth/ds5_l2cap.c
     debug/ds5_log.c
     ds5/ds5_protocol.c
+    platform/ds5_input_mailbox.c
+    usb/ds5_usb_hid.c
     usb/ds5_usb_log.c
 )
 

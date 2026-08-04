@@ -17,6 +17,7 @@
 
 #include "ds5_bt_policy.h"
 #include "ds5_l2cap.h"
+#include "ds5_input_mailbox.h"
 #include "ds5_protocol.h"
 #include "ds5_log.h"
 
@@ -61,6 +62,7 @@ static uint32_t received_control_packets;
 static uint32_t received_interrupt_packets;
 static uint32_t valid_input_reports;
 static uint32_t invalid_input_reports;
+static uint32_t input_mailbox_publish_failures;
 static uint8_t latest_usb_input_payload[DS5_USB_INPUT_PAYLOAD_SIZE];
 
 static const struct bt_br_discovery_param discovery_param = {
@@ -83,6 +85,8 @@ static const char *ds5_bt_state_name(ds5_bt_state_t state)
         return "idle";
     case DS5_BT_STATE_CANDIDATE_READY:
         return "candidate-ready";
+    case DS5_BT_STATE_RECONNECT_WAIT:
+        return "reconnect-wait";
     case DS5_BT_STATE_ACL_CONNECTING:
         return "acl-connecting";
     case DS5_BT_STATE_SECURING:
@@ -162,8 +166,13 @@ static void ds5_bt_reset_link_state(void)
 
 static void ds5_bt_return_to_candidate(void)
 {
-    ds5_bt_set_state(candidate.valid ? DS5_BT_STATE_CANDIDATE_READY
-                                     : DS5_BT_STATE_IDLE);
+    if (!candidate.valid) {
+        ds5_bt_set_state(DS5_BT_STATE_IDLE);
+    } else if (candidate.saved_address) {
+        ds5_bt_set_state(DS5_BT_STATE_RECONNECT_WAIT);
+    } else {
+        ds5_bt_set_state(DS5_BT_STATE_CANDIDATE_READY);
+    }
 }
 
 static int ds5_bt_disconnect_active(uint8_t reason)
@@ -586,6 +595,14 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
             sizeof(latest_usb_input_payload));
         if (protocol_result == DS5_PROTOCOL_OK) {
             ++valid_input_reports;
+            if (!ds5_input_mailbox_publish(latest_usb_input_payload,
+                                           sizeof(latest_usb_input_payload))) {
+                ++input_mailbox_publish_failures;
+                if (input_mailbox_publish_failures <= 4U) {
+                    printf("DS5 BT: input mailbox publish failed (%lu)\r\n",
+                           (unsigned long)input_mailbox_publish_failures);
+                }
+            }
             if (valid_input_reports == 1U) {
                 printf("DS5 BT: first valid 0x31 input report accepted "
                        "(length %u)\r\n",
@@ -702,7 +719,12 @@ static void ds5_bt_ready(int err)
             printf("DS5 BT: connectable enable failed (err %d)\r\n", err);
         }
 
-        ds5_bt_set_state(DS5_BT_STATE_CANDIDATE_READY);
+        /*
+         * A DualSense started with the PS button pages its saved host. Keep
+         * page scan enabled and accept that incoming ACL instead of repeatedly
+         * paging the controller at the same time.
+         */
+        ds5_bt_set_state(DS5_BT_STATE_RECONNECT_WAIT);
         return;
     }
 
