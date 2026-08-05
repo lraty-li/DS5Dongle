@@ -34,6 +34,16 @@ extern "C" {
 #define DS5_BT_OUTPUT_STATE_OFFSET         3U
 #define DS5_BT_OUTPUT_CRC_OFFSET           74U
 
+/* Original src/bt.cpp update_state() report, including its BT CRC. */
+#define DS5_BT_INITIALIZATION_TRANSACTION_SIZE 143U
+#define DS5_BT_INITIALIZATION_REPORT_SIZE  142U
+#define DS5_BT_INITIALIZATION_REPORT_ID    0x32U
+#define DS5_BT_INITIALIZATION_TAG          0x10U
+#define DS5_BT_INITIALIZATION_FLAGS        0x90U
+#define DS5_BT_INITIALIZATION_MODE         0x3FU
+#define DS5_BT_INITIALIZATION_STATE_OFFSET 4U
+#define DS5_BT_INITIALIZATION_CRC_OFFSET   138U
+
 #define DS5_HAPTICS_DATA_SIZE              128U
 #define DS5_BT_HAPTICS_TRANSACTION_SIZE    548U
 #define DS5_BT_HAPTICS_REPORT_SIZE         547U
@@ -82,6 +92,16 @@ ds5_protocol_result_t ds5_build_bt_output_transaction(
     ds5_output_sequence_t *sequence,
     const uint8_t *usb_report,
     size_t usb_report_length,
+    uint8_t *bt_transaction,
+    size_t bt_transaction_capacity,
+    size_t *bt_transaction_length);
+
+/*
+ * Build the startup state report emitted by original src/bt.cpp after the
+ * HID Interrupt channel opens. mic_select is the original two-bit setting.
+ */
+ds5_protocol_result_t ds5_build_bt_initialization_transaction(
+    uint8_t mic_select,
     uint8_t *bt_transaction,
     size_t bt_transaction_capacity,
     size_t *bt_transaction_length);

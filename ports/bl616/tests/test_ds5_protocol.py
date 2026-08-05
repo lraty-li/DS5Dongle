@@ -108,6 +108,29 @@ def build_bt_haptics(haptics_data, sequence, packet_counter):
     )
 
 
+def build_bt_initialization(mic_select=0):
+    if not 0 <= mic_select <= 3:
+        raise ValueError("unexpected microphone selection")
+
+    report = bytearray(CONSTANTS["DS5_BT_INITIALIZATION_REPORT_SIZE"])
+    report[0] = CONSTANTS["DS5_BT_INITIALIZATION_REPORT_ID"]
+    report[1] = CONSTANTS["DS5_BT_INITIALIZATION_TAG"]
+    report[2] = CONSTANTS["DS5_BT_INITIALIZATION_FLAGS"]
+    report[3] = CONSTANTS["DS5_BT_INITIALIZATION_MODE"]
+    state = CONSTANTS["DS5_BT_INITIALIZATION_STATE_OFFSET"]
+    report[state + 0] = 0x80
+    report[state + 1] = 0x04
+    report[state + 7] = mic_select
+    report[state + 38] = 0x03
+    report[state + 41] = 0x02
+    report[state + 42] = 0x00
+    report[state + 44 : state + 47] = bytes.fromhex("ffd700")
+    crc_offset = CONSTANTS["DS5_BT_INITIALIZATION_CRC_OFFSET"]
+    crc = crc32_seeded(report[:crc_offset], 0xEADA2D49)
+    report[crc_offset:] = crc.to_bytes(4, "little")
+    return bytes([CONSTANTS["DS5_BT_OUTPUT_TRANSACTION_HEADER"]]) + bytes(report)
+
+
 def build_feature_set(report_id, payload):
     body = bytes([report_id]) + bytes(payload)
     crc = crc32_seeded(body, 0x2060EFC3)
@@ -151,6 +174,14 @@ class Ds5ProtocolContractTests(unittest.TestCase):
             CONSTANTS["DS5_BT_HAPTICS_DATA_OFFSET"]
             + CONSTANTS["DS5_HAPTICS_DATA_SIZE"],
             CONSTANTS["DS5_BT_HAPTICS_CRC_OFFSET"],
+        )
+        self.assertEqual(
+            CONSTANTS["DS5_BT_INITIALIZATION_REPORT_SIZE"] + 1,
+            CONSTANTS["DS5_BT_INITIALIZATION_TRANSACTION_SIZE"],
+        )
+        self.assertEqual(
+            CONSTANTS["DS5_BT_INITIALIZATION_CRC_OFFSET"] + 4,
+            CONSTANTS["DS5_BT_INITIALIZATION_REPORT_SIZE"],
         )
 
     def test_extracts_63_byte_input_payload(self):
@@ -204,6 +235,29 @@ class Ds5ProtocolContractTests(unittest.TestCase):
         padding_end = state_offset + CONSTANTS["DS5_SET_STATE_SIZE"]
         self.assertEqual(transaction[padding_start:padding_end], bytes(16))
         self.assertEqual(next_sequence, 0)
+
+    def test_startup_state_matches_original_update_state_contract(self):
+        transaction = build_bt_initialization()
+        state = CONSTANTS["DS5_BT_INITIALIZATION_STATE_OFFSET"] + 1
+
+        self.assertEqual(
+            len(transaction), CONSTANTS["DS5_BT_INITIALIZATION_TRANSACTION_SIZE"]
+        )
+        self.assertEqual(transaction[:5], bytes.fromhex("a23210903f"))
+        self.assertEqual(transaction[state + 0], 0x80)
+        self.assertEqual(transaction[state + 1], 0x04)
+        self.assertEqual(transaction[state + 38], 0x03)
+        self.assertEqual(transaction[state + 41], 0x02)
+        self.assertEqual(transaction[state + 44 : state + 47], bytes.fromhex("ffd700"))
+        self.assertEqual(transaction[-4:], bytes.fromhex("172d9c79"))
+
+    def test_startup_state_preserves_two_bit_microphone_setting(self):
+        transaction = build_bt_initialization(3)
+        state = CONSTANTS["DS5_BT_INITIALIZATION_STATE_OFFSET"] + 1
+
+        self.assertEqual(transaction[state + 7], 3)
+        with self.assertRaises(ValueError):
+            build_bt_initialization(4)
 
     def test_rejects_wrong_usb_output_shape(self):
         with self.assertRaises(ValueError):

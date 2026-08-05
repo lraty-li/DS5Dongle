@@ -20,6 +20,15 @@ _Static_assert(DS5_BT_OUTPUT_CRC_OFFSET + 4U == DS5_BT_OUTPUT_REPORT_SIZE,
 _Static_assert(DS5_BT_OUTPUT_STATE_OFFSET + DS5_SET_STATE_SIZE <=
                    DS5_BT_OUTPUT_CRC_OFFSET,
                "Bluetooth output state overlaps CRC");
+_Static_assert(DS5_BT_INITIALIZATION_REPORT_SIZE + 1U ==
+                   DS5_BT_INITIALIZATION_TRANSACTION_SIZE,
+               "Bluetooth initialization transaction size mismatch");
+_Static_assert(DS5_BT_INITIALIZATION_STATE_OFFSET + DS5_SET_STATE_SIZE <=
+                   DS5_BT_INITIALIZATION_CRC_OFFSET,
+               "Bluetooth initialization state overlaps CRC");
+_Static_assert(DS5_BT_INITIALIZATION_CRC_OFFSET + 4U ==
+                   DS5_BT_INITIALIZATION_REPORT_SIZE,
+               "Bluetooth initialization CRC offset mismatch");
 _Static_assert(DS5_BT_HAPTICS_REPORT_SIZE + 1U ==
                    DS5_BT_HAPTICS_TRANSACTION_SIZE,
                "Bluetooth haptics transaction size mismatch");
@@ -150,6 +159,56 @@ ds5_protocol_result_t ds5_build_bt_output_transaction(
 
     sequence->next_value = (uint8_t)((sequence_value + 1U) & 0x0FU);
     *bt_transaction_length = DS5_BT_OUTPUT_TRANSACTION_SIZE;
+    return DS5_PROTOCOL_OK;
+}
+
+ds5_protocol_result_t ds5_build_bt_initialization_transaction(
+    uint8_t mic_select,
+    uint8_t *bt_transaction,
+    size_t bt_transaction_capacity,
+    size_t *bt_transaction_length)
+{
+    uint8_t *report;
+    uint8_t *state;
+    uint32_t crc;
+
+    if (bt_transaction_length != NULL) {
+        *bt_transaction_length = 0U;
+    }
+
+    if ((bt_transaction == NULL) || (bt_transaction_length == NULL) ||
+        (mic_select > 3U)) {
+        return DS5_PROTOCOL_ERROR_ARGUMENT;
+    }
+
+    if (bt_transaction_capacity < DS5_BT_INITIALIZATION_TRANSACTION_SIZE) {
+        return DS5_PROTOCOL_ERROR_CAPACITY;
+    }
+
+    memset(bt_transaction, 0, DS5_BT_INITIALIZATION_TRANSACTION_SIZE);
+    bt_transaction[0] = DS5_BT_OUTPUT_TRANSACTION_HEADER;
+    report = &bt_transaction[1];
+    report[0] = DS5_BT_INITIALIZATION_REPORT_ID;
+    report[1] = DS5_BT_INITIALIZATION_TAG;
+    report[2] = DS5_BT_INITIALIZATION_FLAGS;
+    report[3] = DS5_BT_INITIALIZATION_MODE;
+
+    /* Exact SetStateData fields initialized by original src/bt.cpp. */
+    state = &report[DS5_BT_INITIALIZATION_STATE_OFFSET];
+    state[0] = 0x80U; /* AllowAudioControl */
+    state[1] = 0x04U; /* AllowLedColor */
+    state[7] = mic_select; /* MicSelect */
+    state[38] = 0x03U; /* Light brightness and fade-animation controls */
+    state[41] = 0x02U; /* LightFadeAnimation::FadeOut */
+    state[42] = 0x00U; /* LightBrightness::Bright */
+    state[44] = 0xFFU;
+    state[45] = 0xD7U;
+    state[46] = 0x00U;
+
+    crc = ds5_crc32_seeded(report, DS5_BT_INITIALIZATION_CRC_OFFSET,
+                           DS5_OUTPUT_CRC32_SEED);
+    ds5_write_u32_le(&report[DS5_BT_INITIALIZATION_CRC_OFFSET], crc);
+    *bt_transaction_length = DS5_BT_INITIALIZATION_TRANSACTION_SIZE;
     return DS5_PROTOCOL_OK;
 }
 

@@ -23,6 +23,12 @@
 #define DS5_USB_HID_PRIORITY     (configMAX_PRIORITIES - 4U)
 #define DS5_USB_HID_WAIT_MS      10U
 #define DS5_USB_HID_LOG_INTERVAL 1024U
+#define DS5_USB_HID_REJECT_PREVIEW_SIZE 16U
+#define DS5_USB_HID_OUTPUT_TRACE_PREVIEW_SIZE 12U
+#define DS5_USB_HID_OUTPUT_TRACE_LIMIT         32U
+
+#define DS5_USB_HID_REJECT_SOURCE_INTERRUPT 1U
+#define DS5_USB_HID_REJECT_SOURCE_CONTROL   2U
 
 /* Exact DualSense (USB PID 0x0ce6) HID report model from this repository. */
 static const uint8_t hid_report_descriptor[] = {
@@ -67,7 +73,7 @@ static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
     uint8_t hid_last_report[DS5_USB_HID_IN_REPORT_SIZE];
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
-    uint8_t hid_receive_report[DS5_USB_HID_ENDPOINT_MPS];
+    uint8_t hid_receive_report[DS5_USB_OUTPUT_REPORT_SIZE];
 
 static struct usbd_interface hid_interface;
 static uint8_t hid_bus_id;
@@ -82,6 +88,23 @@ static volatile uint32_t hid_rejected_output_reports;
 static volatile uint32_t hid_feature_cache_hits;
 static volatile uint32_t hid_feature_cache_misses;
 static volatile uint32_t hid_out_arm_failures;
+static volatile uint8_t hid_last_rejected_source;
+static volatile uint8_t hid_last_rejected_report_id;
+static volatile uint8_t hid_last_rejected_report_type;
+static volatile uint32_t hid_last_rejected_length;
+static volatile uint8_t
+    hid_last_rejected_preview[DS5_USB_HID_REJECT_PREVIEW_SIZE];
+static volatile uint32_t hid_output_trace_count;
+static volatile uint32_t hid_last_output_transfer_length;
+static volatile uint8_t hid_last_output_source;
+static volatile bool hid_last_output_had_in_band_report_id;
+static volatile uint8_t
+    hid_last_output_raw_preview[DS5_USB_HID_OUTPUT_TRACE_PREVIEW_SIZE];
+static volatile uint8_t hid_last_output_state_flags_0;
+static volatile uint8_t hid_last_output_state_flags_1;
+static volatile uint8_t hid_last_output_right_trigger[4];
+static volatile uint8_t hid_last_output_left_trigger[4];
+static volatile uint8_t hid_last_output_rgb[3];
 
 static StaticTask_t hid_task_storage;
 static StackType_t hid_task_stack[DS5_USB_HID_STACK_DEPTH];
@@ -127,19 +150,83 @@ static struct usbd_endpoint hid_in_endpoint = {
     .ep_cb = ds5_usb_hid_in,
 };
 
-static bool ds5_usb_hid_publish_output(const uint8_t *report, size_t length)
+static void ds5_usb_hid_note_rejected_output(uint8_t source,
+                                             uint8_t report_id,
+                                             uint8_t report_type,
+                                             const uint8_t *report,
+                                             size_t length)
+{
+    size_t index;
+
+    hid_last_rejected_source = source;
+    hid_last_rejected_report_id = report_id;
+    hid_last_rejected_report_type = report_type;
+    hid_last_rejected_length = (uint32_t)length;
+    for (index = 0U; index < DS5_USB_HID_REJECT_PREVIEW_SIZE; ++index) {
+        hid_last_rejected_preview[index] =
+            ((report != NULL) && (index < length)) ? report[index] : 0U;
+    }
+
+    ++hid_rejected_output_reports;
+    ds5_usb_hid_notify();
+}
+
+static bool ds5_usb_hid_publish_output(uint8_t source,
+                                       uint8_t report_id,
+                                       uint8_t report_type,
+                                       const uint8_t *report,
+                                       size_t length)
 {
     if ((report == NULL) || (length != DS5_USB_OUTPUT_REPORT_SIZE) ||
         (report[0] != DS5_USB_OUTPUT_REPORT_ID) ||
         !ds5_output_mailbox_publish(report, length)) {
-        ++hid_rejected_output_reports;
-        ds5_usb_hid_notify();
+        ds5_usb_hid_note_rejected_output(source, report_id, report_type,
+                                         report, length);
         return false;
     }
 
     ++hid_received_output_reports;
     ds5_usb_hid_notify();
     return true;
+}
+
+/*
+ * The BL616 USB v2 callback exposes raw endpoint bytes, while Windows HID
+ * APIs may describe the report ID separately.  Keep a bounded trace in
+ * callback context and print it from the HID task, so transport framing can
+ * be verified without doing I/O in an interrupt.
+ */
+static void ds5_usb_hid_note_output_trace(
+    uint8_t source, const uint8_t *raw_report, size_t raw_length,
+    bool had_in_band_report_id, const uint8_t *canonical_report)
+{
+    size_t index;
+
+    if ((raw_report == NULL) || (canonical_report == NULL) ||
+        (hid_output_trace_count >= DS5_USB_HID_OUTPUT_TRACE_LIMIT)) {
+        return;
+    }
+
+    hid_last_output_source = source;
+    hid_last_output_transfer_length = (uint32_t)raw_length;
+    hid_last_output_had_in_band_report_id = had_in_band_report_id;
+    for (index = 0U; index < DS5_USB_HID_OUTPUT_TRACE_PREVIEW_SIZE; ++index) {
+        hid_last_output_raw_preview[index] =
+            (index < raw_length) ? raw_report[index] : 0U;
+    }
+
+    hid_last_output_state_flags_0 = canonical_report[1];
+    hid_last_output_state_flags_1 = canonical_report[2];
+    for (index = 0U; index < sizeof(hid_last_output_right_trigger); ++index) {
+        hid_last_output_right_trigger[index] = canonical_report[11U + index];
+        hid_last_output_left_trigger[index] = canonical_report[22U + index];
+    }
+    for (index = 0U; index < sizeof(hid_last_output_rgb); ++index) {
+        hid_last_output_rgb[index] = canonical_report[45U + index];
+    }
+
+    ++hid_output_trace_count;
+    ds5_usb_hid_notify();
 }
 
 static void ds5_usb_hid_arm_out(void)
@@ -161,12 +248,26 @@ static void ds5_usb_hid_arm_out(void)
 static void ds5_usb_hid_out(uint8_t busid, uint8_t endpoint,
                             uint32_t transferred_bytes)
 {
+    bool published;
+
     (void)busid;
     (void)endpoint;
 
     hid_out_read_pending = false;
-    (void)ds5_usb_hid_publish_output(hid_receive_report,
-                                     transferred_bytes);
+    /*
+     * The local HID descriptor specifies 47 output bytes for report 0x02.
+     * USB interrupt transport includes the report ID, so arm VDMA for the
+     * exact 48-byte wire report.  Asking the BL616 USB v2 VDMA for the
+     * 64-byte endpoint MPS merges adjacent short reports into one buffer.
+     */
+    published = ds5_usb_hid_publish_output(
+        DS5_USB_HID_REJECT_SOURCE_INTERRUPT, 0U, HID_REPORT_OUTPUT,
+        hid_receive_report, (size_t)transferred_bytes);
+    if (published) {
+        ds5_usb_hid_note_output_trace(
+            DS5_USB_HID_REJECT_SOURCE_INTERRUPT, hid_receive_report,
+            transferred_bytes, true, hid_receive_report);
+    }
     ds5_usb_hid_arm_out();
 }
 
@@ -225,7 +326,9 @@ void usbd_hid_set_report(uint8_t busid, uint8_t interface,
         (report_length == DS5_USB_OUTPUT_STATE_SIZE)) {
         normalized_report[0] = DS5_USB_OUTPUT_REPORT_ID;
         memcpy(&normalized_report[1], report, report_length);
-        (void)ds5_usb_hid_publish_output(normalized_report,
+        (void)ds5_usb_hid_publish_output(
+            DS5_USB_HID_REJECT_SOURCE_CONTROL, report_id, report_type,
+            normalized_report,
                                          sizeof(normalized_report));
         return;
     }
@@ -233,12 +336,15 @@ void usbd_hid_set_report(uint8_t busid, uint8_t interface,
     if (((report_id == 0U) ||
          (report_id == DS5_USB_OUTPUT_REPORT_ID)) &&
         (report_length == DS5_USB_OUTPUT_REPORT_SIZE)) {
-        (void)ds5_usb_hid_publish_output(report, report_length);
+        (void)ds5_usb_hid_publish_output(
+            DS5_USB_HID_REJECT_SOURCE_CONTROL, report_id, report_type,
+            report, report_length);
         return;
     }
 
-    ++hid_rejected_output_reports;
-    ds5_usb_hid_notify();
+    ds5_usb_hid_note_rejected_output(DS5_USB_HID_REJECT_SOURCE_CONTROL,
+                                     report_id, report_type, report,
+                                     report_length);
 }
 
 static void ds5_usb_hid_task(void *parameter)
@@ -247,6 +353,7 @@ static void ds5_usb_hid_task(void *parameter)
     uint32_t observed_completions = 0U;
     uint32_t observed_short_completions = 0U;
     uint32_t observed_output_reports = 0U;
+    uint32_t observed_output_traces = 0U;
     uint32_t observed_rejected_outputs = 0U;
     uint32_t observed_feature_hits = 0U;
     uint32_t observed_feature_misses = 0U;
@@ -260,6 +367,7 @@ static void ds5_usb_hid_task(void *parameter)
         uint32_t completions = hid_completed_reports;
         uint32_t short_completions = hid_short_completions;
         uint32_t output_reports = hid_received_output_reports;
+        uint32_t output_traces = hid_output_trace_count;
         uint32_t rejected_outputs = hid_rejected_output_reports;
         uint32_t feature_hits = hid_feature_cache_hits;
         uint32_t feature_misses = hid_feature_cache_misses;
@@ -290,13 +398,109 @@ static void ds5_usb_hid_task(void *parameter)
             if (observed_output_reports == 0U) {
                 ds5_log_printf("DS5 USB: first 0x02 HID OUT report "
                                "received\r\n");
+            } else if ((output_reports / DS5_USB_HID_LOG_INTERVAL) !=
+                       (observed_output_reports /
+                        DS5_USB_HID_LOG_INTERVAL)) {
+                ds5_log_printf("DS5 USB: HID OUT reports received %lu\r\n",
+                               (unsigned long)output_reports);
             }
             observed_output_reports = output_reports;
         }
 
+        if (output_traces != observed_output_traces) {
+            uint8_t raw[DS5_USB_HID_OUTPUT_TRACE_PREVIEW_SIZE];
+            uint8_t right_trigger[4];
+            uint8_t left_trigger[4];
+            uint8_t rgb[3];
+            uint8_t source = hid_last_output_source;
+            uint8_t flags_0 = hid_last_output_state_flags_0;
+            uint8_t flags_1 = hid_last_output_state_flags_1;
+            bool had_in_band_report_id = hid_last_output_had_in_band_report_id;
+            uint32_t raw_length = hid_last_output_transfer_length;
+            size_t index;
+
+            for (index = 0U; index < sizeof(raw); ++index) {
+                raw[index] = hid_last_output_raw_preview[index];
+            }
+            for (index = 0U; index < sizeof(right_trigger); ++index) {
+                right_trigger[index] = hid_last_output_right_trigger[index];
+                left_trigger[index] = hid_last_output_left_trigger[index];
+            }
+            for (index = 0U; index < sizeof(rgb); ++index) {
+                rgb[index] = hid_last_output_rgb[index];
+            }
+
+            ds5_log_printf(
+                "DS5 USB: OUT trace %lu via %s raw %lu, report-id %s\\r\\n",
+                (unsigned long)output_traces,
+                (source == DS5_USB_HID_REJECT_SOURCE_INTERRUPT) ?
+                    "interrupt" : "control",
+                (unsigned long)raw_length,
+                had_in_band_report_id ? "in-band" : "out-of-band");
+            ds5_log_printf(
+                "DS5 USB: raw %02x %02x %02x %02x %02x %02x %02x %02x "
+                "%02x %02x %02x %02x\\r\\n",
+                (unsigned int)raw[0], (unsigned int)raw[1],
+                (unsigned int)raw[2], (unsigned int)raw[3],
+                (unsigned int)raw[4], (unsigned int)raw[5],
+                (unsigned int)raw[6], (unsigned int)raw[7],
+                (unsigned int)raw[8], (unsigned int)raw[9],
+                (unsigned int)raw[10], (unsigned int)raw[11]);
+            ds5_log_printf(
+                "DS5 USB: state flags %02x %02x, R %02x %02x %02x %02x, "
+                "L %02x %02x %02x %02x, RGB %02x %02x %02x\\r\\n",
+                (unsigned int)flags_0, (unsigned int)flags_1,
+                (unsigned int)right_trigger[0],
+                (unsigned int)right_trigger[1],
+                (unsigned int)right_trigger[2],
+                (unsigned int)right_trigger[3],
+                (unsigned int)left_trigger[0],
+                (unsigned int)left_trigger[1],
+                (unsigned int)left_trigger[2],
+                (unsigned int)left_trigger[3],
+                (unsigned int)rgb[0], (unsigned int)rgb[1],
+                (unsigned int)rgb[2]);
+            observed_output_traces = output_traces;
+        }
+
         if (rejected_outputs != observed_rejected_outputs) {
-            ds5_log_printf("DS5 USB: rejected HID OUT reports %lu\r\n",
-                           (unsigned long)rejected_outputs);
+            uint8_t preview[DS5_USB_HID_REJECT_PREVIEW_SIZE];
+            uint8_t source = hid_last_rejected_source;
+            uint8_t report_id = hid_last_rejected_report_id;
+            uint8_t report_type = hid_last_rejected_report_type;
+            uint32_t length = hid_last_rejected_length;
+            size_t index;
+
+            for (index = 0U; index < sizeof(preview); ++index) {
+                preview[index] = hid_last_rejected_preview[index];
+            }
+            ds5_log_printf("DS5 USB: rejected HID OUT %lu via %s, "
+                           "id 0x%02x type %u len %lu\r\n",
+                           (unsigned long)rejected_outputs,
+                           (source == DS5_USB_HID_REJECT_SOURCE_INTERRUPT) ?
+                               "interrupt" : "control",
+                           (unsigned int)report_id,
+                           (unsigned int)report_type,
+                           (unsigned long)length);
+            ds5_log_printf("DS5 USB: rejected bytes %02x %02x %02x %02x "
+                           "%02x %02x %02x %02x %02x %02x %02x %02x "
+                           "%02x %02x %02x %02x\r\n",
+                           (unsigned int)preview[0],
+                           (unsigned int)preview[1],
+                           (unsigned int)preview[2],
+                           (unsigned int)preview[3],
+                           (unsigned int)preview[4],
+                           (unsigned int)preview[5],
+                           (unsigned int)preview[6],
+                           (unsigned int)preview[7],
+                           (unsigned int)preview[8],
+                           (unsigned int)preview[9],
+                           (unsigned int)preview[10],
+                           (unsigned int)preview[11],
+                           (unsigned int)preview[12],
+                           (unsigned int)preview[13],
+                           (unsigned int)preview[14],
+                           (unsigned int)preview[15]);
             observed_rejected_outputs = rejected_outputs;
         }
 
@@ -360,6 +564,8 @@ static void ds5_usb_hid_task(void *parameter)
 
 int ds5_usb_hid_init(uint8_t busid)
 {
+    size_t index;
+
     if (hid_task != NULL) {
         return -EALREADY;
     }
@@ -376,9 +582,16 @@ int ds5_usb_hid_init(uint8_t busid)
     hid_feature_cache_hits = 0U;
     hid_feature_cache_misses = 0U;
     hid_out_arm_failures = 0U;
+    hid_last_rejected_source = 0U;
+    hid_last_rejected_report_id = 0U;
+    hid_last_rejected_report_type = 0U;
+    hid_last_rejected_length = 0U;
     memset(hid_transmit_report, 0, sizeof(hid_transmit_report));
     memset(hid_last_report, 0, sizeof(hid_last_report));
     memset(hid_receive_report, 0, sizeof(hid_receive_report));
+    for (index = 0U; index < sizeof(hid_last_rejected_preview); ++index) {
+        hid_last_rejected_preview[index] = 0U;
+    }
     hid_last_report[0] = DS5_USB_INPUT_REPORT_ID;
 
     hid_task = xTaskCreateStatic(ds5_usb_hid_task, "usb_hid",

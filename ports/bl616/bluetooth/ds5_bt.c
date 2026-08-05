@@ -36,12 +36,13 @@
 #define DS5_BT_HAPTICS_LOG_INTERVAL   256U
 #define DS5_BT_OUTPUT_READY_TIMEOUT_MS 5000U
 #define DS5_BT_TX_POLL_MS              1U
+#define DS5_BT_DEFAULT_MIC_SELECT      0U
 
 static const uint8_t feature_prefetch_ids[] = {
-    0x05U,
     0x09U,
     0x20U,
     0x22U,
+    0x05U,
 };
 
 typedef struct {
@@ -85,6 +86,8 @@ static uint32_t transmitted_haptics_reports;
 static uint32_t failed_haptics_reports;
 static uint32_t discarded_haptics_not_ready;
 static uint8_t latest_usb_input_payload[DS5_USB_INPUT_PAYLOAD_SIZE];
+static uint32_t failed_initialization_reports;
+static volatile bool initialization_pending;
 static ds5_output_sequence_t output_sequence;
 static uint8_t haptics_packet_counter;
 
@@ -189,6 +192,7 @@ static void ds5_bt_reset_link_state(void)
     calibration_response_received = false;
     feature_request_pending = false;
     feature_prefetch_index = 0U;
+    initialization_pending = false;
     ds5_output_sequence_reset(&output_sequence, 0U);
     haptics_packet_counter = 0U;
 }
@@ -566,6 +570,7 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
                        "(err %d)\r\n",
                        request_err);
             }
+            initialization_pending = true;
             ds5_bt_set_state(DS5_BT_STATE_READY);
         }
         break;
@@ -763,6 +768,39 @@ static void ds5_bt_forward_usb_output(
                (unsigned long)transmitted_output_reports,
                (unsigned long)failed_output_reports);
     }
+
+}
+
+static bool ds5_bt_send_initialization(uint8_t *bt_transaction,
+                                       size_t bt_transaction_capacity)
+{
+    size_t transaction_length;
+    ds5_protocol_result_t protocol_result;
+    int send_result;
+
+    protocol_result = ds5_build_bt_initialization_transaction(
+        DS5_BT_DEFAULT_MIC_SELECT, bt_transaction, bt_transaction_capacity,
+        &transaction_length);
+    if (protocol_result != DS5_PROTOCOL_OK) {
+        ++failed_initialization_reports;
+        printf("DS5 BT: initialization report build failed (result %d)\r\n",
+               (int)protocol_result);
+        return false;
+    }
+
+    send_result = ds5_l2cap_send(DS5_L2CAP_CHANNEL_INTERRUPT,
+                                 bt_transaction, transaction_length);
+    if (send_result < 0) {
+        ++failed_initialization_reports;
+        if (failed_initialization_reports <= 4U) {
+            printf("DS5 BT: initialization report send failed (err %d)\r\n",
+                   send_result);
+        }
+        return false;
+    }
+
+    printf("DS5 BT: original startup state report forwarded\r\n");
+    return true;
 }
 
 static void ds5_bt_forward_haptics(
@@ -839,6 +877,14 @@ static void ds5_bt_tx_worker(void *parameter)
             pending_usb_output = true;
             pending_usb_output_since = xTaskGetTickCount();
             did_work = true;
+        }
+
+        if (initialization_pending && ds5_bt_interrupt_ready()) {
+            if (ds5_bt_send_initialization(bt_transaction,
+                                           sizeof(bt_transaction))) {
+                initialization_pending = false;
+                did_work = true;
+            }
         }
 
         if (ds5_haptics_mailbox_try_receive(haptics_data,

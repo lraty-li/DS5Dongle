@@ -72,6 +72,44 @@ class Ds5UsbHidTests(unittest.TestCase):
         )
         self.assertIn("memcpy(&hid_transmit_report[1], payload", source)
 
+    def test_hid_out_reads_exact_wire_report_size(self):
+        source = HID_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "uint8_t hid_receive_report[DS5_USB_OUTPUT_REPORT_SIZE]", source
+        )
+        arm_start = source.index("static void ds5_usb_hid_arm_out")
+        arm_end = source.index("static void ds5_usb_hid_out", arm_start)
+        self.assertIn(
+            "sizeof(hid_receive_report)", source[arm_start:arm_end]
+        )
+
+    def test_hid_out_preserves_in_band_report_id(self):
+        source = HID_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "USB interrupt transport includes the report ID", source
+        )
+        self.assertIn(
+            "hid_receive_report, (size_t)transferred_bytes", source
+        )
+        self.assertNotIn(
+            "hid_receive_report[0] != DS5_USB_OUTPUT_REPORT_ID",
+            source,
+        )
+
+    def test_hid_out_trace_is_copied_in_callback_and_logged_by_task(self):
+        source = HID_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("DS5_USB_HID_OUTPUT_TRACE_LIMIT", source)
+        self.assertIn("ds5_usb_hid_note_output_trace", source)
+        self.assertIn("DS5 USB: OUT trace", source)
+        self.assertIn("DS5 USB: state flags", source)
+        self.assertLess(
+            source.index("ds5_usb_hid_note_output_trace"),
+            source.index("static void ds5_usb_hid_task"),
+        )
+
     def test_composite_descriptor_keeps_cdc_hid_and_adds_audio(self):
         source = USB_SOURCE.read_text(encoding="utf-8")
 
@@ -125,7 +163,6 @@ class Ds5UsbHidTests(unittest.TestCase):
         self.assertIn(
             "ds5_input_mailbox_publish", source[valid_start:valid_end]
         )
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
