@@ -157,10 +157,24 @@ class Ds5BtPolicyTests(unittest.TestCase):
         self.assertNotIn("bt_conn_ref(", source)
         self.assertNotIn("bt_conn_unref(", source)
 
-    def test_connection_state_machine_has_no_usb_or_audio_dependency(self):
+    def test_connection_state_machine_keeps_codecs_and_usb_outside_bluetooth(self):
         source = BT_SOURCE_PATH.read_text(encoding="utf-8").lower()
-        for forbidden in ("cherryusb", "tinyusb", "opus", "wdl", "audio"):
+        for forbidden in ("cherryusb", "tinyusb", "#include \"opus.h\"", "wdl_"):
             self.assertNotIn(forbidden, source)
+        self.assertIn('#include "ds5_audio_mailbox.h"', source)
+
+    def test_feature_set_uses_bluetooth_control_l2cap(self):
+        source = BT_SOURCE_PATH.read_text(encoding="utf-8")
+        helper_start = source.index("static bool ds5_bt_send_feature_set(")
+        helper_end = source.index("static void ds5_bt_tx_worker", helper_start)
+        helper = source[helper_start:helper_end]
+
+        self.assertIn("ds5_build_feature_set_transaction", helper)
+        self.assertIn("DS5_L2CAP_CHANNEL_CONTROL", helper)
+        self.assertIn("ds5_l2cap_send", helper)
+        self.assertIn("ds5_feature_set_mailbox_note_forwarded", helper)
+        self.assertIn("ds5_feature_set_mailbox_note_forward_failed", helper)
+        self.assertIn("ds5_feature_set_mailbox_try_receive", source)
 
 
 if __name__ == "__main__":

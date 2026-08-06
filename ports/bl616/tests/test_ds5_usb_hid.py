@@ -10,6 +10,7 @@ HID_SOURCE = BL616_DIR / "usb" / "ds5_usb_hid.c"
 USB_SOURCE = BL616_DIR / "usb" / "ds5_usb_log.c"
 MAILBOX_SOURCE = BL616_DIR / "platform" / "ds5_input_mailbox.c"
 OUTPUT_MAILBOX_SOURCE = BL616_DIR / "platform" / "ds5_output_mailbox.c"
+FEATURE_SET_MAILBOX_SOURCE = BL616_DIR / "platform" / "ds5_feature_set_mailbox.c"
 FEATURE_CACHE_SOURCE = BL616_DIR / "ds5" / "ds5_feature_cache.c"
 BT_SOURCE = BL616_DIR / "bluetooth" / "ds5_bt.c"
 ORIGINAL_DESCRIPTOR_SOURCE = REPO_ROOT / "src" / "usb_descriptors.cpp"
@@ -110,20 +111,22 @@ class Ds5UsbHidTests(unittest.TestCase):
             source.index("static void ds5_usb_hid_task"),
         )
 
-    def test_composite_descriptor_keeps_cdc_hid_and_adds_audio(self):
+    def test_native_dualsense_descriptor_uses_hid_and_full_duplex_audio(self):
         source = USB_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("CDC_ACM_DESCRIPTOR_INIT", source)
-        self.assertIn(
-            "USB_CONFIG_DESCRIPTOR_INIT(DS5_USB_CONFIG_SIZE, 0x05", source
-        )
+        self.assertNotIn("CDC_ACM_DESCRIPTOR_INIT", source)
+        self.assertIn("#define DS5_USB_CONFIG_SIZE 227U", source)
+        self.assertIn("0x09, 0x02, 0xe3, 0x00, 0x04", source)
         self.assertIn("DS5_USB_HID_INTERFACE_NUMBER", source)
         self.assertIn("DS5_USB_HID_IN_EP", source)
         self.assertIn("DS5_USB_HID_OUT_EP", source)
-        self.assertIn("AUDIO_AC_DESCRIPTOR_INIT", source)
-        self.assertIn("AUDIO_AS_DESCRIPTOR_INIT", source)
-        self.assertIn("DS5_USB_AUDIO_STREAM_INTERFACE", source)
-        self.assertIn("DS5_USB_AUDIO_OUT_EP", source)
+        self.assertIn("0x0a, 0x24, 0x01, 0x00, 0x01, 0x49, 0x00", source)
+        self.assertIn("0x09, 0x05, 0x01, 0x09, 0x88, 0x01", source)
+        self.assertIn("0x09, 0x05, 0x82, 0x05, 0xc4, 0x00", source)
+        self.assertIn("0x09, 0x04, 0x01, 0x00", source)
+        self.assertIn("0x09, 0x04, 0x02, 0x00", source)
+        self.assertIn("0x09, 0x05, 0x01, 0x09", source)
+        self.assertIn("0x09, 0x05, 0x82, 0x05", source)
         self.assertIn("0x054cU", source)
         self.assertIn("0x0ce6U", source)
         self.assertIn('"DualSense Wireless Controller"', source)
@@ -147,6 +150,38 @@ class Ds5UsbHidTests(unittest.TestCase):
         )
         self.assertNotIn("malloc(", source)
         self.assertNotIn("free(", source)
+
+    def test_feature_set_uses_a_separate_ordered_mailbox(self):
+        source = FEATURE_SET_MAILBOX_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("xQueueCreateStatic", source)
+        self.assertIn("xQueueSendFromISR", source)
+        self.assertIn("xQueueSend(feature_set_queue", source)
+        self.assertIn("xQueueReceive(feature_set_queue", source)
+        self.assertNotIn("xQueueOverwrite", source)
+        self.assertNotIn("malloc(", source)
+        self.assertNotIn("free(", source)
+
+    def test_feature_set_report_is_bridged_but_local_audio_diag_is_not(self):
+        source = HID_SOURCE.read_text(encoding="utf-8")
+        publish_start = source.index("static bool ds5_usb_hid_publish_feature_set(")
+        publish_end = source.index("static void ds5_usb_hid_task(", publish_start)
+        publish = source[publish_start:publish_end]
+        callback_start = source.index("void usbd_hid_set_report(")
+        callback_end = source.index("static void ds5_usb_hid_task(", callback_start)
+        callback = source[callback_start:callback_end]
+
+        self.assertIn("report_type == HID_REPORT_FEATURE", callback)
+        self.assertIn("ds5_usb_hid_publish_feature_set", callback)
+        self.assertIn("ds5_feature_set_mailbox_publish", publish)
+        self.assertIn("ds5_feature_set_mailbox_note_received", publish)
+        self.assertIn("length == (DS5_FEATURE_SET_MAX_PAYLOAD + 1U)", publish)
+        self.assertIn("payload = &report[1]", publish)
+        self.assertIn("DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_ID", publish)
+        self.assertLess(
+            callback.index("report_type == HID_REPORT_FEATURE"),
+            callback.index("report_type != HID_REPORT_OUTPUT"),
+        )
 
     def test_feature_cache_is_bounded_and_double_buffered(self):
         source = FEATURE_CACHE_SOURCE.read_text(encoding="utf-8")

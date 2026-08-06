@@ -38,6 +38,10 @@ _Static_assert(DS5_BT_HAPTICS_CRC_OFFSET + 4U ==
 _Static_assert(DS5_BT_HAPTICS_DATA_OFFSET + DS5_HAPTICS_DATA_SIZE <=
                    DS5_BT_HAPTICS_CRC_OFFSET,
                "Bluetooth haptics data overlaps CRC");
+_Static_assert(DS5_BT_AUDIO_SPEAKER_DATA_OFFSET +
+                   DS5_BT_AUDIO_SPEAKER_DATA_SIZE <=
+                   DS5_BT_HAPTICS_CRC_OFFSET,
+               "Bluetooth speaker data overlaps CRC");
 
 static uint32_t ds5_crc32_seeded(const uint8_t *data, size_t length,
                                  uint32_t seed)
@@ -212,11 +216,15 @@ ds5_protocol_result_t ds5_build_bt_initialization_transaction(
     return DS5_PROTOCOL_OK;
 }
 
-ds5_protocol_result_t ds5_build_bt_haptics_transaction(
+ds5_protocol_result_t ds5_build_bt_audio_transaction(
     ds5_output_sequence_t *sequence,
     uint8_t *packet_counter,
     const uint8_t *haptics_data,
     size_t haptics_data_length,
+    bool microphone_enabled,
+    bool route_to_headphones,
+    const uint8_t *speaker_opus_data,
+    size_t speaker_opus_data_length,
     uint8_t *bt_transaction,
     size_t bt_transaction_capacity,
     size_t *bt_transaction_length)
@@ -231,11 +239,17 @@ ds5_protocol_result_t ds5_build_bt_haptics_transaction(
 
     if ((sequence == NULL) || (packet_counter == NULL) ||
         (haptics_data == NULL) || (bt_transaction == NULL) ||
-        (bt_transaction_length == NULL)) {
+        (bt_transaction_length == NULL) ||
+        ((speaker_opus_data == NULL) && (speaker_opus_data_length != 0U))) {
         return DS5_PROTOCOL_ERROR_ARGUMENT;
     }
 
     if (haptics_data_length != DS5_HAPTICS_DATA_SIZE) {
+        return DS5_PROTOCOL_ERROR_LENGTH;
+    }
+
+    if ((speaker_opus_data_length != 0U) &&
+        (speaker_opus_data_length != DS5_BT_AUDIO_SPEAKER_DATA_SIZE)) {
         return DS5_PROTOCOL_ERROR_LENGTH;
     }
 
@@ -253,7 +267,8 @@ ds5_protocol_result_t ds5_build_bt_haptics_transaction(
         (uint8_t)(sequence_value << 4U);
     bt_report[2] = DS5_BT_HAPTICS_STREAM_FLAGS;
     bt_report[3] = DS5_BT_HAPTICS_HEADER_LENGTH;
-    bt_report[4] = DS5_BT_HAPTICS_ROUTING;
+    bt_report[4] = microphone_enabled ? DS5_BT_AUDIO_MIC_ENABLED_ROUTING :
+                                        DS5_BT_HAPTICS_ROUTING;
     bt_report[5] = DS5_BT_HAPTICS_BUFFER_LENGTH;
     bt_report[6] = DS5_BT_HAPTICS_BUFFER_LENGTH;
     bt_report[7] = DS5_BT_HAPTICS_BUFFER_LENGTH;
@@ -265,12 +280,81 @@ ds5_protocol_result_t ds5_build_bt_haptics_transaction(
     memcpy(&bt_report[DS5_BT_HAPTICS_DATA_OFFSET], haptics_data,
            DS5_HAPTICS_DATA_SIZE);
 
+    if (speaker_opus_data_length != 0U) {
+        bt_report[DS5_BT_AUDIO_SPEAKER_FLAGS_OFFSET] =
+            route_to_headphones ? DS5_BT_AUDIO_HEADPHONE_FLAGS :
+                                  DS5_BT_AUDIO_SPEAKER_FLAGS;
+        bt_report[DS5_BT_AUDIO_SPEAKER_LENGTH_OFFSET] =
+            DS5_AUDIO_SPEAKER_OPUS_SIZE;
+        memcpy(&bt_report[DS5_BT_AUDIO_SPEAKER_DATA_OFFSET],
+               speaker_opus_data, speaker_opus_data_length);
+    }
+
     crc = ds5_crc32_seeded(bt_report, DS5_BT_HAPTICS_CRC_OFFSET,
                            DS5_OUTPUT_CRC32_SEED);
     ds5_write_u32_le(&bt_report[DS5_BT_HAPTICS_CRC_OFFSET], crc);
 
     sequence->next_value = (uint8_t)((sequence_value + 1U) & 0x0FU);
     *bt_transaction_length = DS5_BT_HAPTICS_TRANSACTION_SIZE;
+    return DS5_PROTOCOL_OK;
+}
+
+ds5_protocol_result_t ds5_build_bt_haptics_transaction(
+    ds5_output_sequence_t *sequence,
+    uint8_t *packet_counter,
+    const uint8_t *haptics_data,
+    size_t haptics_data_length,
+    uint8_t *bt_transaction,
+    size_t bt_transaction_capacity,
+    size_t *bt_transaction_length)
+{
+    return ds5_build_bt_audio_transaction(
+        sequence, packet_counter, haptics_data, haptics_data_length, false,
+        false, NULL, 0U, bt_transaction, bt_transaction_capacity,
+        bt_transaction_length);
+}
+
+ds5_protocol_result_t ds5_build_bt_microphone_status_transaction(
+    ds5_output_sequence_t *sequence,
+    bool microphone_enabled,
+    uint8_t *bt_transaction,
+    size_t bt_transaction_capacity,
+    size_t *bt_transaction_length)
+{
+    uint8_t *report;
+    uint8_t sequence_value;
+    uint32_t crc;
+
+    if (bt_transaction_length != NULL) {
+        *bt_transaction_length = 0U;
+    }
+
+    if ((sequence == NULL) || (bt_transaction == NULL) ||
+        (bt_transaction_length == NULL)) {
+        return DS5_PROTOCOL_ERROR_ARGUMENT;
+    }
+
+    if (bt_transaction_capacity < DS5_BT_MIC_STATUS_TRANSACTION_SIZE) {
+        return DS5_PROTOCOL_ERROR_CAPACITY;
+    }
+
+    memset(bt_transaction, 0, DS5_BT_MIC_STATUS_TRANSACTION_SIZE);
+    bt_transaction[0] = DS5_BT_OUTPUT_TRANSACTION_HEADER;
+    report = &bt_transaction[DS5_BT_OUTPUT_REPORT_OFFSET];
+    sequence_value = sequence->next_value & 0x0FU;
+    report[0] = DS5_BT_MIC_STATUS_REPORT_ID;
+    report[1] = (uint8_t)(sequence_value << 4U);
+    report[2] = DS5_BT_MIC_STATUS_FLAGS;
+    report[3] = DS5_BT_MIC_STATUS_LENGTH;
+    report[4] = microphone_enabled ? DS5_BT_MIC_STATUS_ENABLED :
+                                     DS5_BT_MIC_STATUS_DISABLED;
+
+    crc = ds5_crc32_seeded(report, DS5_BT_INITIALIZATION_CRC_OFFSET,
+                           DS5_OUTPUT_CRC32_SEED);
+    ds5_write_u32_le(&report[DS5_BT_INITIALIZATION_CRC_OFFSET], crc);
+
+    sequence->next_value = (uint8_t)((sequence_value + 1U) & 0x0FU);
+    *bt_transaction_length = DS5_BT_MIC_STATUS_TRANSACTION_SIZE;
     return DS5_PROTOCOL_OK;
 }
 

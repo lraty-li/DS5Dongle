@@ -6,7 +6,9 @@
 #include "easyflash.h"
 #include "rfparam_adapter.h"
 
+#include "ds5_audio_mailbox.h"
 #include "ds5_bt.h"
+#include "ds5_feature_set_mailbox.h"
 #include "ds5_haptics_mailbox.h"
 #include "ds5_input_mailbox.h"
 #include "ds5_output_mailbox.h"
@@ -36,10 +38,10 @@ static void app_start_task(void *parameter)
 
     err = ds5_usb_log_init();
     if (err != 0) {
-        ds5_log_printf("DS5 USB: CDC/HID initialization failed (err %d)\r\n",
+        ds5_log_printf("DS5 USB: HID/UAC initialization failed (err %d)\r\n",
                        err);
     } else {
-        ds5_log_printf("DS5 USB: CDC/HID composite initialized\r\n");
+        ds5_log_printf("DS5 USB: HID/UAC composite initialized\r\n");
     }
 
     while (1) {
@@ -118,9 +120,25 @@ int main(void)
         return 0;
     }
 
+    mailbox_err = ds5_feature_set_mailbox_init();
+    if (mailbox_err != 0) {
+        ds5_log_printf("DS5: Feature SET mailbox initialization failed "
+                       "(err %d)\r\n",
+                       mailbox_err);
+        return 0;
+    }
+
     mailbox_err = ds5_haptics_mailbox_init();
     if (mailbox_err != 0) {
         ds5_log_printf("DS5: haptics mailbox initialization failed "
+                       "(err %d)\r\n",
+                       mailbox_err);
+        return 0;
+    }
+
+    mailbox_err = ds5_audio_mailbox_init();
+    if (mailbox_err != 0) {
+        ds5_log_printf("DS5: audio mailbox initialization failed "
                        "(err %d)\r\n",
                        mailbox_err);
         return 0;

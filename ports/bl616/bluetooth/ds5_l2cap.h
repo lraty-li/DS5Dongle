@@ -12,7 +12,8 @@ extern "C" {
 #define DS5_HID_CONTROL_PSM          0x0011U
 #define DS5_HID_INTERRUPT_PSM        0x0013U
 #define DS5_L2CAP_MTU                672U
-#define DS5_L2CAP_MAX_EVENT_PAYLOAD  80U
+/* The 0x39 DualSense audio report is 547 bytes before its L2CAP header. */
+#define DS5_L2CAP_MAX_EVENT_PAYLOAD  DS5_L2CAP_MTU
 
 struct bt_conn;
 

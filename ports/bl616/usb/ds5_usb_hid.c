@@ -14,6 +14,8 @@
 #include "usbd_hid.h"
 
 #include "ds5_feature_cache.h"
+#include "ds5_feature_set_mailbox.h"
+#include "ds5_usb_audio.h"
 #include "ds5_input_mailbox.h"
 #include "ds5_log.h"
 #include "ds5_output_mailbox.h"
@@ -74,6 +76,8 @@ static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
     uint8_t hid_last_report[DS5_USB_HID_IN_REPORT_SIZE];
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
     uint8_t hid_receive_report[DS5_USB_OUTPUT_REPORT_SIZE];
+static uint8_t
+    hid_audio_diagnostic[DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_SIZE];
 
 static struct usbd_interface hid_interface;
 static uint8_t hid_bus_id;
@@ -87,6 +91,8 @@ static volatile uint32_t hid_received_output_reports;
 static volatile uint32_t hid_rejected_output_reports;
 static volatile uint32_t hid_feature_cache_hits;
 static volatile uint32_t hid_feature_cache_misses;
+static volatile uint32_t hid_received_feature_sets;
+static volatile uint32_t hid_feature_set_publish_failures;
 static volatile uint32_t hid_out_arm_failures;
 static volatile uint8_t hid_last_rejected_source;
 static volatile uint8_t hid_last_rejected_report_id;
@@ -186,6 +192,36 @@ static bool ds5_usb_hid_publish_output(uint8_t source,
     }
 
     ++hid_received_output_reports;
+    ds5_usb_hid_notify();
+    return true;
+}
+
+static bool ds5_usb_hid_publish_feature_set(uint8_t report_id,
+                                             const uint8_t *report,
+                                             size_t length)
+{
+    const uint8_t *payload = report;
+    size_t payload_length = length;
+
+    ds5_feature_set_mailbox_note_received(report_id, length);
+    if ((report != NULL) &&
+        (length == (DS5_FEATURE_SET_MAX_PAYLOAD + 1U)) &&
+        (report[0] == report_id)) {
+        payload = &report[1];
+        payload_length = DS5_FEATURE_SET_MAX_PAYLOAD;
+    }
+
+    if ((report_id == DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_ID) ||
+        (payload == NULL) || (payload_length > DS5_FEATURE_SET_MAX_PAYLOAD) ||
+        !ds5_feature_set_mailbox_publish(report_id, payload, payload_length)) {
+        ++hid_feature_set_publish_failures;
+        ds5_usb_hid_note_rejected_output(
+            DS5_USB_HID_REJECT_SOURCE_CONTROL, report_id,
+            HID_REPORT_FEATURE, report, length);
+        return false;
+    }
+
+    ++hid_received_feature_sets;
     ds5_usb_hid_notify();
     return true;
 }
@@ -300,6 +336,16 @@ void usbd_hid_get_report(uint8_t busid, uint8_t interface,
     if (report_type == HID_REPORT_FEATURE) {
         size_t cached_length;
 
+        if (report_id == DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_ID) {
+            cached_length = ds5_usb_audio_get_diagnostic_feature(
+                hid_audio_diagnostic, sizeof(hid_audio_diagnostic));
+            if (cached_length != 0U) {
+                *data = hid_audio_diagnostic;
+                *length = (uint32_t)cached_length;
+            }
+            return;
+        }
+
         if (ds5_feature_cache_get(report_id, data, &cached_length)) {
             *length = (uint32_t)cached_length;
             ++hid_feature_cache_hits;
@@ -317,8 +363,17 @@ void usbd_hid_set_report(uint8_t busid, uint8_t interface,
     uint8_t normalized_report[DS5_USB_OUTPUT_REPORT_SIZE];
 
     if ((busid != hid_bus_id) ||
-        (interface != DS5_USB_HID_INTERFACE_NUMBER) ||
-        (report_type != HID_REPORT_OUTPUT) || (report == NULL)) {
+        (interface != DS5_USB_HID_INTERFACE_NUMBER)) {
+        return;
+    }
+
+    if (report_type == HID_REPORT_FEATURE) {
+        (void)ds5_usb_hid_publish_feature_set(report_id, report,
+                                               (size_t)report_length);
+        return;
+    }
+
+    if ((report_type != HID_REPORT_OUTPUT) || (report == NULL)) {
         return;
     }
 
@@ -357,6 +412,8 @@ static void ds5_usb_hid_task(void *parameter)
     uint32_t observed_rejected_outputs = 0U;
     uint32_t observed_feature_hits = 0U;
     uint32_t observed_feature_misses = 0U;
+    uint32_t observed_feature_sets = 0U;
+    uint32_t observed_feature_set_failures = 0U;
     uint32_t observed_out_arm_failures = 0U;
     uint32_t start_failures = 0U;
     bool configured_announced = false;
@@ -371,6 +428,8 @@ static void ds5_usb_hid_task(void *parameter)
         uint32_t rejected_outputs = hid_rejected_output_reports;
         uint32_t feature_hits = hid_feature_cache_hits;
         uint32_t feature_misses = hid_feature_cache_misses;
+        uint32_t feature_sets = hid_received_feature_sets;
+        uint32_t feature_set_failures = hid_feature_set_publish_failures;
         uint32_t out_arm_failures = hid_out_arm_failures;
 
         if (completions != observed_completions) {
@@ -513,6 +572,18 @@ static void ds5_usb_hid_task(void *parameter)
             observed_feature_misses = feature_misses;
         }
 
+        if (feature_sets != observed_feature_sets) {
+            ds5_log_printf("DS5 USB: HID Feature SET reports received %lu\r\n",
+                           (unsigned long)feature_sets);
+            observed_feature_sets = feature_sets;
+        }
+
+        if (feature_set_failures != observed_feature_set_failures) {
+            ds5_log_printf("DS5 USB: HID Feature SET reports rejected %lu\r\n",
+                           (unsigned long)feature_set_failures);
+            observed_feature_set_failures = feature_set_failures;
+        }
+
         if (out_arm_failures != observed_out_arm_failures) {
             ds5_log_printf("DS5 USB: HID OUT arm failures %lu\r\n",
                            (unsigned long)out_arm_failures);
@@ -581,6 +652,8 @@ int ds5_usb_hid_init(uint8_t busid)
     hid_rejected_output_reports = 0U;
     hid_feature_cache_hits = 0U;
     hid_feature_cache_misses = 0U;
+    hid_received_feature_sets = 0U;
+    hid_feature_set_publish_failures = 0U;
     hid_out_arm_failures = 0U;
     hid_last_rejected_source = 0U;
     hid_last_rejected_report_id = 0U;

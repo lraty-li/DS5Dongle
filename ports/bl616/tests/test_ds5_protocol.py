@@ -108,6 +108,74 @@ def build_bt_haptics(haptics_data, sequence, packet_counter):
     )
 
 
+def build_bt_audio(
+    haptics_data,
+    sequence,
+    packet_counter,
+    microphone_enabled,
+    route_to_headphones,
+    speaker_opus_data,
+):
+    if len(haptics_data) != CONSTANTS["DS5_HAPTICS_DATA_SIZE"]:
+        raise ValueError("unexpected haptics data length")
+    if len(speaker_opus_data) not in (0, 400):
+        raise ValueError("unexpected speaker Opus length")
+
+    report = bytearray(CONSTANTS["DS5_BT_HAPTICS_REPORT_SIZE"])
+    report[0] = CONSTANTS["DS5_BT_HAPTICS_REPORT_ID"]
+    report[1] = (sequence & 0x0F) << 4
+    report[2] = CONSTANTS["DS5_BT_HAPTICS_STREAM_FLAGS"]
+    report[3] = CONSTANTS["DS5_BT_HAPTICS_HEADER_LENGTH"]
+    report[4] = (
+        CONSTANTS["DS5_BT_AUDIO_MIC_ENABLED_ROUTING"]
+        if microphone_enabled
+        else CONSTANTS["DS5_BT_HAPTICS_ROUTING"]
+    )
+    report[5:9] = bytes([CONSTANTS["DS5_BT_HAPTICS_BUFFER_LENGTH"]]) * 4
+    packet_counter = (packet_counter + 2) & 0xFF
+    report[9] = packet_counter
+    report[10] = CONSTANTS["DS5_BT_HAPTICS_BLOCK_FLAGS"]
+    report[11] = CONSTANTS["DS5_BT_HAPTICS_BLOCK_LENGTH"]
+    report[12 : 12 + len(haptics_data)] = haptics_data
+    if speaker_opus_data:
+        report[CONSTANTS["DS5_BT_AUDIO_SPEAKER_FLAGS_OFFSET"]] = (
+            CONSTANTS["DS5_BT_AUDIO_HEADPHONE_FLAGS"]
+            if route_to_headphones
+            else CONSTANTS["DS5_BT_AUDIO_SPEAKER_FLAGS"]
+        )
+        report[CONSTANTS["DS5_BT_AUDIO_SPEAKER_LENGTH_OFFSET"]] = 200
+        offset = CONSTANTS["DS5_BT_AUDIO_SPEAKER_DATA_OFFSET"]
+        report[offset : offset + len(speaker_opus_data)] = speaker_opus_data
+    crc_offset = CONSTANTS["DS5_BT_HAPTICS_CRC_OFFSET"]
+    crc = crc32_seeded(report[:crc_offset], 0xEADA2D49)
+    report[crc_offset:] = crc.to_bytes(4, "little")
+    return (
+        bytes([CONSTANTS["DS5_BT_OUTPUT_TRANSACTION_HEADER"]]) + bytes(report),
+        ((sequence & 0x0F) + 1) & 0x0F,
+        packet_counter,
+    )
+
+
+def build_bt_microphone_status(microphone_enabled, sequence):
+    report = bytearray(CONSTANTS["DS5_BT_INITIALIZATION_REPORT_SIZE"])
+    report[0] = CONSTANTS["DS5_BT_MIC_STATUS_REPORT_ID"]
+    report[1] = (sequence & 0x0F) << 4
+    report[2] = CONSTANTS["DS5_BT_MIC_STATUS_FLAGS"]
+    report[3] = CONSTANTS["DS5_BT_MIC_STATUS_LENGTH"]
+    report[4] = (
+        CONSTANTS["DS5_BT_MIC_STATUS_ENABLED"]
+        if microphone_enabled
+        else CONSTANTS["DS5_BT_MIC_STATUS_DISABLED"]
+    )
+    crc_offset = CONSTANTS["DS5_BT_INITIALIZATION_CRC_OFFSET"]
+    crc = crc32_seeded(report[:crc_offset], 0xEADA2D49)
+    report[crc_offset:] = crc.to_bytes(4, "little")
+    return (
+        bytes([CONSTANTS["DS5_BT_OUTPUT_TRANSACTION_HEADER"]]) + bytes(report),
+        ((sequence & 0x0F) + 1) & 0x0F,
+    )
+
+
 def build_bt_initialization(mic_select=0):
     if not 0 <= mic_select <= 3:
         raise ValueError("unexpected microphone selection")
@@ -299,6 +367,44 @@ class Ds5ProtocolContractTests(unittest.TestCase):
         self.assertEqual(next_sequence, 0)
         self.assertEqual(next_counter, 0)
 
+    def test_audio_report_embeds_two_fixed_opus_frames(self):
+        haptics = bytes(range(CONSTANTS["DS5_HAPTICS_DATA_SIZE"]))
+        speaker = bytes(range(200)) + bytes(range(200))
+        transaction, next_sequence, next_counter = build_bt_audio(
+            haptics, 0x0F, 0xFE, True, True, speaker
+        )
+        report = transaction[1:]
+        offset = CONSTANTS["DS5_BT_AUDIO_SPEAKER_DATA_OFFSET"]
+
+        self.assertEqual(len(transaction), 548)
+        self.assertEqual(report[1], 0xF0)
+        self.assertEqual(
+            report[4], CONSTANTS["DS5_BT_AUDIO_MIC_ENABLED_ROUTING"]
+        )
+        self.assertEqual(
+            report[CONSTANTS["DS5_BT_AUDIO_SPEAKER_FLAGS_OFFSET"]],
+            CONSTANTS["DS5_BT_AUDIO_HEADPHONE_FLAGS"],
+        )
+        self.assertEqual(
+            report[CONSTANTS["DS5_BT_AUDIO_SPEAKER_LENGTH_OFFSET"]], 200
+        )
+        self.assertEqual(report[offset : offset + len(speaker)], speaker)
+        self.assertEqual(next_sequence, 0)
+        self.assertEqual(next_counter, 0)
+
+    def test_microphone_status_uses_audio_state_report_and_crc(self):
+        transaction, next_sequence = build_bt_microphone_status(True, 3)
+        report = transaction[1:]
+
+        self.assertEqual(len(transaction), 143)
+        self.assertEqual(transaction[:6], bytes.fromhex("a23230910103"))
+        self.assertEqual(report[4], CONSTANTS["DS5_BT_MIC_STATUS_ENABLED"])
+        self.assertEqual(next_sequence, 4)
+        self.assertEqual(
+            int.from_bytes(report[-4:], "little"),
+            crc32_seeded(report[:-4], 0xEADA2D49),
+        )
+
     def test_rejects_wrong_haptics_shape(self):
         with self.assertRaises(ValueError):
             build_bt_haptics(
@@ -313,6 +419,12 @@ class Ds5ProtocolContractTests(unittest.TestCase):
         self.assertEqual(
             build_feature_set(0x20, bytes.fromhex("010203")),
             bytes.fromhex("532001020337b45eb3"),
+        )
+        self.assertEqual(CONSTANTS["DS5_FEATURE_SET_MAX_PAYLOAD"], 63)
+        self.assertEqual(
+            len(build_feature_set(0x80, bytes(63))),
+            CONSTANTS["DS5_FEATURE_SET_MAX_PAYLOAD"]
+            + CONSTANTS["DS5_FEATURE_SET_OVERHEAD"],
         )
 
     def test_protocol_c_has_no_platform_includes(self):

@@ -1,48 +1,61 @@
 #include "ds5_usb_log.h"
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include <FreeRTOS.h>
-#include "portmacro.h"
-#include "task.h"
-
 #include "usbd_core.h"
-#include "usbd_cdc_acm.h"
 #include "usbd_hid.h"
-#include "usbd_audio.h"
 
-#include "ds5_log.h"
 #include "ds5_usb_audio.h"
 #include "ds5_usb_hid.h"
 
 #define DS5_USB_BUS_ID          0U
-#define DS5_USB_CDC_IN_EP       0x84U
-#define DS5_USB_CDC_OUT_EP      0x04U
-#define DS5_USB_CDC_INT_EP      0x83U
 #define DS5_USB_VID             0x054cU
 #define DS5_USB_PID             0x0ce6U
 #define DS5_USB_MAX_POWER_MA    100U
-#define DS5_USB_CDC_MPS         512U
-#define DS5_USB_CONFIG_SIZE     \
-    (9U + CDC_ACM_DESCRIPTOR_LEN + DS5_USB_HID_CONFIG_DESCRIPTOR_SIZE + \
-     DS5_USB_AUDIO_CONFIG_DESCRIPTOR_SIZE)
-#define DS5_USB_LOG_STACK_DEPTH (configMINIMAL_STACK_SIZE * 4U)
-#define DS5_USB_LOG_PRIORITY    (configMAX_PRIORITIES - 4U)
+#define DS5_USB_CONFIG_SIZE 227U
 
 static const uint8_t device_descriptor[] = {
-    USB_DEVICE_DESCRIPTOR_INIT(USB_2_0, 0xef, 0x02, 0x01,
+    USB_DEVICE_DESCRIPTOR_INIT(USB_2_0, 0x00, 0x00, 0x00,
                                DS5_USB_VID, DS5_USB_PID, 0x0100, 0x01)
 };
 
 static const uint8_t config_descriptor[] = {
-    USB_CONFIG_DESCRIPTOR_INIT(DS5_USB_CONFIG_SIZE, 0x05, 0x01,
-                               USB_CONFIG_BUS_POWERED,
-                               DS5_USB_MAX_POWER_MA),
-    CDC_ACM_DESCRIPTOR_INIT(0x00, DS5_USB_CDC_INT_EP,
-                            DS5_USB_CDC_OUT_EP, DS5_USB_CDC_IN_EP,
-                            DS5_USB_CDC_MPS, 0x02),
+    /* Native DualSense UAC1 function, transcribed from src/usb_descriptors.cpp. */
+    0x09, 0x02, 0xe3, 0x00, 0x04, 0x01, 0x00, 0xc0, 0xfa,
+
+    /* AudioControl interface 0: 4-channel host output and stereo host input. */
+    0x09, 0x04, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00,
+    0x0a, 0x24, 0x01, 0x00, 0x01, 0x49, 0x00, 0x02, 0x01, 0x02,
+    0x0c, 0x24, 0x02, 0x01, 0x01, 0x01, 0x06, 0x04, 0x33, 0x00,
+    0x00, 0x00,
+    0x0c, 0x24, 0x06, 0x02, 0x01, 0x01, 0x03, 0x00, 0x00, 0x00,
+    0x00, 0x00,
+    0x09, 0x24, 0x03, 0x03, 0x01, 0x03, 0x04, 0x02, 0x00,
+    0x0c, 0x24, 0x02, 0x04, 0x02, 0x04, 0x03, 0x02, 0x03, 0x00,
+    0x00, 0x00,
+    0x09, 0x24, 0x06, 0x05, 0x04, 0x01, 0x03, 0x00, 0x00,
+    0x09, 0x24, 0x03, 0x06, 0x01, 0x01, 0x01, 0x05, 0x00,
+
+    /* AudioStreaming interface 1: 48 kHz, four-channel PCM OUT on EP 1. */
+    0x09, 0x04, 0x01, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00,
+    0x09, 0x04, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00,
+    0x07, 0x24, 0x01, 0x01, 0x01, 0x01, 0x00,
+    0x0b, 0x24, 0x02, 0x01, 0x04, 0x02, 0x10, 0x01, 0x80, 0xbb,
+    0x00,
+    0x09, 0x05, 0x01, 0x09, 0x88, 0x01, 0x01, 0x00, 0x00,
+    0x07, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00,
+
+    /* AudioStreaming interface 2: 48 kHz stereo PCM IN on EP 2. */
+    0x09, 0x04, 0x02, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00,
+    0x09, 0x04, 0x02, 0x01, 0x01, 0x01, 0x02, 0x00, 0x00,
+    0x07, 0x24, 0x01, 0x06, 0x01, 0x01, 0x00,
+    0x0b, 0x24, 0x02, 0x01, 0x02, 0x02, 0x10, 0x01, 0x80, 0xbb,
+    0x00,
+    0x09, 0x05, 0x82, 0x05, 0xc4, 0x00, 0x01, 0x00, 0x00,
+    0x07, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00,
+
+    /* HID interface 3: EP 4 IN and EP 3 OUT, matching the native DS5. */
     0x09,
     USB_DESCRIPTOR_TYPE_INTERFACE,
     DS5_USB_HID_INTERFACE_NUMBER,
@@ -74,53 +87,22 @@ static const uint8_t config_descriptor[] = {
     (uint8_t)(DS5_USB_HID_ENDPOINT_MPS & 0xffU),
     (uint8_t)(DS5_USB_HID_ENDPOINT_MPS >> 8U),
     DS5_USB_HID_POLL_INTERVAL,
-    AUDIO_AC_DESCRIPTOR_INIT(DS5_USB_AUDIO_CONTROL_INTERFACE, 0x02,
-                             0x002a, 0x00,
-                             DS5_USB_AUDIO_STREAM_INTERFACE),
-    AUDIO_AC_INPUT_TERMINAL_DESCRIPTOR_INIT(
-        0x01, AUDIO_TERMINAL_STREAMING,
-        DS5_USB_AUDIO_CHANNEL_COUNT, 0x0033),
-    AUDIO_AC_FEATURE_UNIT_DESCRIPTOR_INIT(
-        0x02, 0x01, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00),
-    AUDIO_AC_OUTPUT_TERMINAL_DESCRIPTOR_INIT(
-        0x03, AUDIO_OUTTERM_SPEAKER, 0x02),
-    AUDIO_AS_DESCRIPTOR_INIT(
-        DS5_USB_AUDIO_STREAM_INTERFACE, 0x01,
-        DS5_USB_AUDIO_CHANNEL_COUNT, DS5_USB_AUDIO_SAMPLE_BYTES, 0x10,
-        DS5_USB_AUDIO_OUT_EP, 0x09, DS5_USB_AUDIO_MAX_PACKET_BYTES,
-        0x04, AUDIO_SAMPLE_FREQ_3B(DS5_USB_AUDIO_SAMPLE_RATE)),
 };
 
 _Static_assert(sizeof(config_descriptor) == DS5_USB_CONFIG_SIZE,
-               "CDC/HID/Audio configuration descriptor size mismatch");
+               "DualSense HID/UAC configuration descriptor size mismatch");
 
 static const uint8_t device_qualifier_descriptor[] = {
-    USB_DEVICE_QUALIFIER_DESCRIPTOR_INIT(USB_2_0, 0xef, 0x02, 0x01, 0x01)
+    USB_DEVICE_QUALIFIER_DESCRIPTOR_INIT(USB_2_0, 0x00, 0x00, 0x00, 0x01)
 };
 
 static const char *string_descriptors[] = {
     (const char[]){ 0x09, 0x04 },
     "Sony Interactive Entertainment",
     "DualSense Wireless Controller",
-    "BL616-LOG-0001",
+    /* Bump the serial with the original project's descriptor change rule. */
+    "BL616-0002",
 };
-
-static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
-    uint8_t transmit_buffer[DS5_USB_CDC_MPS];
-
-static struct usbd_interface control_interface;
-static struct usbd_interface data_interface;
-
-static volatile bool usb_configured;
-static volatile bool dtr_enabled;
-static volatile bool transmit_active;
-static volatile bool transmit_complete;
-static volatile bool transmit_aborted;
-static size_t transmit_length;
-
-static StaticTask_t log_task_storage;
-static StackType_t log_task_stack[DS5_USB_LOG_STACK_DEPTH];
-static TaskHandle_t log_task;
 
 static const uint8_t *device_descriptor_callback(uint8_t speed)
 {
@@ -147,7 +129,6 @@ static const char *string_descriptor_callback(uint8_t speed, uint8_t index)
     if (index >= (sizeof(string_descriptors) / sizeof(string_descriptors[0]))) {
         return NULL;
     }
-
     return string_descriptors[index];
 }
 
@@ -159,210 +140,37 @@ static const struct usb_descriptor descriptors = {
     .string_descriptor_callback = string_descriptor_callback,
 };
 
-static void ds5_usb_log_notify(void)
-{
-    if (log_task == NULL) {
-        return;
-    }
-
-    if (xPortIsInsideInterrupt()) {
-        BaseType_t task_woken = pdFALSE;
-
-        vTaskNotifyGiveFromISR(log_task, &task_woken);
-        portYIELD_FROM_ISR(task_woken);
-    } else {
-        xTaskNotifyGive(log_task);
-    }
-}
-
 static void ds5_usb_event_handler(uint8_t busid, uint8_t event)
 {
     ds5_usb_hid_handle_event(busid, event);
     ds5_usb_audio_handle_event(busid, event);
-
-    switch (event) {
-    case USBD_EVENT_RESET:
-    case USBD_EVENT_DISCONNECTED:
-    case USBD_EVENT_SUSPEND:
-        usb_configured = false;
-        dtr_enabled = false;
-        if (transmit_active) {
-            transmit_aborted = true;
-        }
-        ds5_usb_log_notify();
-        break;
-    case USBD_EVENT_CONFIGURED:
-    case USBD_EVENT_RESUME:
-        usb_configured = true;
-        ds5_usb_log_notify();
-        break;
-    default:
-        break;
-    }
-}
-
-static void ds5_usb_cdc_in(uint8_t busid, uint8_t endpoint,
-                           uint32_t transferred_bytes)
-{
-    (void)endpoint;
-
-    if (!transmit_active) {
-        return;
-    }
-
-    if ((transferred_bytes != 0U) &&
-        ((transferred_bytes % DS5_USB_CDC_MPS) == 0U)) {
-        if (usbd_ep_start_write(busid, DS5_USB_CDC_IN_EP, NULL, 0U) == 0) {
-            return;
-        }
-    }
-
-    transmit_complete = true;
-    ds5_usb_log_notify();
-}
-
-static struct usbd_endpoint cdc_in_endpoint = {
-    .ep_addr = DS5_USB_CDC_IN_EP,
-    .ep_cb = ds5_usb_cdc_in,
-};
-
-void usbd_cdc_acm_set_dtr(uint8_t busid, uint8_t interface, bool dtr)
-{
-    (void)busid;
-    (void)interface;
-
-    dtr_enabled = dtr;
-    ds5_usb_log_notify();
-}
-
-void usbd_cdc_acm_set_rts(uint8_t busid, uint8_t interface, bool rts)
-{
-    (void)busid;
-    (void)interface;
-    (void)rts;
-}
-
-static void ds5_usb_log_task(void *parameter)
-{
-    bool terminal_announced = false;
-
-    (void)parameter;
-
-    while (1) {
-        if (transmit_active && transmit_complete) {
-            ds5_log_discard(transmit_length);
-            transmit_length = 0U;
-            transmit_active = false;
-            transmit_complete = false;
-            transmit_aborted = false;
-        } else if (transmit_active && transmit_aborted) {
-            transmit_length = 0U;
-            transmit_active = false;
-            transmit_complete = false;
-            transmit_aborted = false;
-        }
-
-        if (!usb_configured) {
-            terminal_announced = false;
-            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100U));
-            continue;
-        }
-
-        if (!dtr_enabled) {
-            terminal_announced = false;
-            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100U));
-            continue;
-        }
-
-        if (!terminal_announced) {
-            uint32_t dropped = ds5_log_dropped_bytes();
-
-            terminal_announced = true;
-            ds5_log_printf("DS5 USB: CDC terminal connected");
-            if (dropped != 0U) {
-                ds5_log_printf(", %lu buffered byte(s) dropped",
-                               (unsigned long)dropped);
-            }
-            ds5_log_printf("\r\n");
-        }
-
-        if (!transmit_active) {
-            int err;
-
-            transmit_length = ds5_log_peek(transmit_buffer,
-                                           sizeof(transmit_buffer));
-            if (transmit_length != 0U) {
-                transmit_complete = false;
-                transmit_aborted = false;
-                transmit_active = true;
-                err = usbd_ep_start_write(DS5_USB_BUS_ID,
-                                          DS5_USB_CDC_IN_EP,
-                                          transmit_buffer,
-                                          (uint32_t)transmit_length);
-                if (err != 0) {
-                    transmit_length = 0U;
-                    transmit_active = false;
-                }
-            }
-        }
-
-        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50U));
-    }
 }
 
 int ds5_usb_log_init(void)
 {
     int err;
 
-    usb_configured = false;
-    dtr_enabled = false;
-    transmit_active = false;
-    transmit_complete = false;
-    transmit_aborted = false;
-    transmit_length = 0U;
-
     usbd_desc_register(DS5_USB_BUS_ID, &descriptors);
-    usbd_add_interface(DS5_USB_BUS_ID,
-                       usbd_cdc_acm_init_intf(DS5_USB_BUS_ID,
-                                              &control_interface));
-    usbd_add_interface(DS5_USB_BUS_ID,
-                       usbd_cdc_acm_init_intf(DS5_USB_BUS_ID,
-                                              &data_interface));
+
     /*
-     * The BL616 USB v2 driver has one VDMA engine per endpoint number, shared
-     * by its IN and OUT directions.  This CDC interface is a read-only debug
-     * log, so leave its advertised OUT endpoint unarmed; otherwise it races
-     * the CDC IN transfer on endpoint number 4.
+     * CherryUSB assigns each class interface number from registration order.
+     * Keep that order identical to config_descriptor: UAC 0..2, then HID 3.
      */
-    usbd_add_endpoint(DS5_USB_BUS_ID, &cdc_in_endpoint);
+    err = ds5_usb_audio_init(DS5_USB_BUS_ID);
+    if (err != 0) {
+        return err;
+    }
 
     err = ds5_usb_hid_init(DS5_USB_BUS_ID);
     if (err != 0) {
-        return err;
-    }
-
-    err = ds5_usb_audio_init(DS5_USB_BUS_ID);
-    if (err != 0) {
-        ds5_usb_hid_deinit();
-        return err;
-    }
-
-    log_task = xTaskCreateStatic(ds5_usb_log_task, "usb_log",
-                                 DS5_USB_LOG_STACK_DEPTH, NULL,
-                                 DS5_USB_LOG_PRIORITY, log_task_stack,
-                                 &log_task_storage);
-    if (log_task == NULL) {
         ds5_usb_audio_deinit();
-        ds5_usb_hid_deinit();
-        return -1;
+        return err;
     }
 
     err = usbd_initialize(DS5_USB_BUS_ID, 0U, ds5_usb_event_handler);
     if (err != 0) {
         ds5_usb_audio_deinit();
         ds5_usb_hid_deinit();
-        vTaskDelete(log_task);
-        log_task = NULL;
         return err;
     }
 

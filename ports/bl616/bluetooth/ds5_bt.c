@@ -16,7 +16,9 @@
 #include "hci_err.h"
 
 #include "ds5_bt_policy.h"
+#include "ds5_audio_mailbox.h"
 #include "ds5_feature_cache.h"
+#include "ds5_feature_set_mailbox.h"
 #include "ds5_haptics_mailbox.h"
 #include "ds5_l2cap.h"
 #include "ds5_input_mailbox.h"
@@ -85,11 +87,19 @@ static uint32_t failed_output_reports;
 static uint32_t transmitted_haptics_reports;
 static uint32_t failed_haptics_reports;
 static uint32_t discarded_haptics_not_ready;
+static uint32_t received_microphone_packets;
+static uint32_t rejected_microphone_packets;
+static uint32_t transmitted_audio_reports;
+static uint32_t transmitted_microphone_status_reports;
+static uint32_t failed_microphone_status_reports;
+static uint32_t transmitted_feature_set_reports;
+static uint32_t failed_feature_set_reports;
 static uint8_t latest_usb_input_payload[DS5_USB_INPUT_PAYLOAD_SIZE];
 static uint32_t failed_initialization_reports;
 static volatile bool initialization_pending;
 static ds5_output_sequence_t output_sequence;
 static uint8_t haptics_packet_counter;
+static bool headset_connected;
 
 static const struct bt_br_discovery_param discovery_param = {
     .length = DS5_BT_DISCOVERY_LENGTH,
@@ -195,6 +205,7 @@ static void ds5_bt_reset_link_state(void)
     initialization_pending = false;
     ds5_output_sequence_reset(&output_sequence, 0U);
     haptics_packet_counter = 0U;
+    headset_connected = false;
 }
 
 static void ds5_bt_return_to_candidate(void)
@@ -658,6 +669,37 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
             }
         }
 
+        /*
+         * The controller marks an Opus microphone payload in byte 2 of its
+         * 0x31 Interrupt report.  It starts at byte 4, not at the normal USB
+         * HID input payload offset.  Keep decode work out of the Bluetooth
+         * worker by handing the fixed-size frame to the audio task.
+         */
+        if ((event->length >= 3U) &&
+            (event->data[0] == DS5_BT_INPUT_TRANSACTION_HEADER) &&
+            (event->data[1] == DS5_BT_INPUT_REPORT_ID) &&
+            ((event->data[2] & 0x02U) != 0U)) {
+            if (event->length < (4U + DS5_AUDIO_MIC_OPUS_SIZE)) {
+                ++rejected_microphone_packets;
+                if (rejected_microphone_packets <= 4U) {
+                    printf("DS5 BT: short microphone packet (length %u)\r\n",
+                           (unsigned int)event->length);
+                }
+            } else if (!ds5_audio_mailbox_publish_microphone_opus(
+                           &event->data[4], DS5_AUDIO_MIC_OPUS_SIZE)) {
+                ++rejected_microphone_packets;
+                if (rejected_microphone_packets <= 4U) {
+                    printf("DS5 BT: microphone audio mailbox full\r\n");
+                }
+            } else {
+                ++received_microphone_packets;
+                if (received_microphone_packets == 1U) {
+                    printf("DS5 BT: first microphone Opus frame queued\r\n");
+                }
+            }
+            break;
+        }
+
         protocol_result = ds5_extract_usb_input_payload(
             event->data, event->length, latest_usb_input_payload,
             sizeof(latest_usb_input_payload));
@@ -676,6 +718,10 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
                        "(length %u)\r\n",
                        (unsigned int)event->length);
             }
+
+            /* Original src/main.cpp uses report byte 53 bit 0 for routing. */
+            headset_connected =
+                (latest_usb_input_payload[53U] & 0x01U) != 0U;
 
             if ((valid_input_reports % DS5_BT_INPUT_LOG_INTERVAL) == 0U) {
                 printf("DS5 BT: input reports valid %lu, invalid %lu, "
@@ -803,8 +849,11 @@ static bool ds5_bt_send_initialization(uint8_t *bt_transaction,
     return true;
 }
 
-static void ds5_bt_forward_haptics(
+static void ds5_bt_forward_audio(
     const uint8_t *haptics_data,
+    bool microphone_enabled,
+    const uint8_t *speaker_opus_data,
+    size_t speaker_opus_data_length,
     uint8_t *bt_transaction,
     size_t bt_transaction_capacity)
 {
@@ -814,16 +863,17 @@ static void ds5_bt_forward_haptics(
     uint8_t previous_packet_counter = haptics_packet_counter;
     int send_result;
 
-    protocol_result = ds5_build_bt_haptics_transaction(
+    protocol_result = ds5_build_bt_audio_transaction(
         &output_sequence, &haptics_packet_counter,
-        haptics_data, DS5_HAPTICS_DATA_SIZE,
+        haptics_data, DS5_HAPTICS_DATA_SIZE, microphone_enabled,
+        headset_connected, speaker_opus_data, speaker_opus_data_length,
         bt_transaction, bt_transaction_capacity, &transaction_length);
     if (protocol_result != DS5_PROTOCOL_OK) {
         output_sequence = previous_sequence;
         haptics_packet_counter = previous_packet_counter;
         ++failed_haptics_reports;
         if (failed_haptics_reports <= 4U) {
-            printf("DS5 BT: haptics report rejected (result %d)\r\n",
+            printf("DS5 BT: audio report rejected (result %d)\r\n",
                    (int)protocol_result);
         }
         return;
@@ -836,46 +886,147 @@ static void ds5_bt_forward_haptics(
         haptics_packet_counter = previous_packet_counter;
         ++failed_haptics_reports;
         if (failed_haptics_reports <= 4U) {
-            printf("DS5 BT: haptics send failed (err %d)\r\n",
+            printf("DS5 BT: audio send failed (err %d)\r\n",
                    send_result);
         }
         return;
     }
 
     ++transmitted_haptics_reports;
+    if (speaker_opus_data_length != 0U) {
+        ++transmitted_audio_reports;
+    }
     if (transmitted_haptics_reports == 1U) {
         printf("DS5 BT: first native haptics report forwarded "
                "(%lu pre-ready block(s) discarded)\r\n",
                (unsigned long)discarded_haptics_not_ready);
     } else if ((transmitted_haptics_reports %
                 DS5_BT_HAPTICS_LOG_INTERVAL) == 0U) {
-        printf("DS5 BT: haptics reports forwarded %lu, failed %lu, "
+        printf("DS5 BT: audio reports %lu, haptics reports %lu, failed %lu, "
                "mailbox dropped %lu\r\n",
+               (unsigned long)transmitted_audio_reports,
                (unsigned long)transmitted_haptics_reports,
                (unsigned long)failed_haptics_reports,
                (unsigned long)ds5_haptics_mailbox_dropped_count());
     }
 }
 
+static bool ds5_bt_send_microphone_status(
+    bool microphone_enabled, uint8_t *bt_transaction,
+    size_t bt_transaction_capacity)
+{
+    size_t transaction_length;
+    ds5_protocol_result_t protocol_result;
+    ds5_output_sequence_t previous_sequence = output_sequence;
+    int send_result;
+
+    protocol_result = ds5_build_bt_microphone_status_transaction(
+        &output_sequence, microphone_enabled, bt_transaction,
+        bt_transaction_capacity, &transaction_length);
+    if (protocol_result != DS5_PROTOCOL_OK) {
+        output_sequence = previous_sequence;
+        ++failed_microphone_status_reports;
+        return false;
+    }
+
+    send_result = ds5_l2cap_send(DS5_L2CAP_CHANNEL_INTERRUPT,
+                                 bt_transaction, transaction_length);
+    if (send_result < 0) {
+        output_sequence = previous_sequence;
+        ++failed_microphone_status_reports;
+        if (failed_microphone_status_reports <= 4U) {
+            printf("DS5 BT: microphone state send failed (err %d)\r\n",
+                   send_result);
+        }
+        return false;
+    }
+
+    ++transmitted_microphone_status_reports;
+    printf("DS5 BT: microphone stream %s\r\n",
+           microphone_enabled ? "enabled" : "disabled");
+    return true;
+}
+
+static bool ds5_bt_send_feature_set(
+    const ds5_feature_set_request_t *request,
+    uint8_t *bt_transaction, size_t bt_transaction_capacity)
+{
+    size_t transaction_length;
+    ds5_protocol_result_t protocol_result;
+    int send_result;
+
+    protocol_result = ds5_build_feature_set_transaction(
+        request->report_id, request->payload, request->payload_length,
+        bt_transaction, bt_transaction_capacity, &transaction_length);
+    if (protocol_result != DS5_PROTOCOL_OK) {
+        ++failed_feature_set_reports;
+        ds5_feature_set_mailbox_note_forward_failed();
+        printf("DS5 BT: Feature SET 0x%02x rejected (result %d)\r\n",
+               (unsigned int)request->report_id, (int)protocol_result);
+        return false;
+    }
+
+    send_result = ds5_l2cap_send(DS5_L2CAP_CHANNEL_CONTROL,
+                                 bt_transaction, transaction_length);
+    if (send_result < 0) {
+        ++failed_feature_set_reports;
+        ds5_feature_set_mailbox_note_forward_failed();
+        if (failed_feature_set_reports <= 4U) {
+            printf("DS5 BT: Feature SET 0x%02x send failed (err %d)\r\n",
+                   (unsigned int)request->report_id, send_result);
+        }
+        return false;
+    }
+
+    ++transmitted_feature_set_reports;
+    ds5_feature_set_mailbox_note_forwarded();
+    printf("DS5 BT: Feature SET 0x%02x forwarded, payload %u, total %lu\r\n",
+           (unsigned int)request->report_id,
+           (unsigned int)request->payload_length,
+           (unsigned long)transmitted_feature_set_reports);
+    return true;
+}
+
 static void ds5_bt_tx_worker(void *parameter)
 {
     uint8_t usb_report[DS5_USB_OUTPUT_REPORT_SIZE];
     uint8_t haptics_data[DS5_HAPTICS_DATA_SIZE];
+    uint8_t speaker_opus_data[DS5_BT_AUDIO_SPEAKER_DATA_SIZE];
     uint8_t bt_transaction[DS5_BT_HAPTICS_TRANSACTION_SIZE];
+    ds5_feature_set_request_t feature_set_request;
     bool pending_usb_output = false;
     TickType_t pending_usb_output_since = 0U;
+    bool pending_haptics = false;
+    bool microphone_stream_enabled = false;
+    bool pending_microphone_state = false;
+    bool pending_feature_set = false;
+    size_t speaker_frame_count = 0U;
 
     (void)parameter;
 
     while (1) {
         bool did_work = false;
         uint8_t newer_report[DS5_USB_OUTPUT_REPORT_SIZE];
+        bool newest_microphone_state;
+
+        if (!pending_feature_set &&
+            ds5_feature_set_mailbox_try_receive(&feature_set_request)) {
+            pending_feature_set = true;
+            did_work = true;
+        }
 
         while (ds5_output_mailbox_try_receive(newer_report,
                                               sizeof(newer_report))) {
             memcpy(usb_report, newer_report, sizeof(usb_report));
             pending_usb_output = true;
             pending_usb_output_since = xTaskGetTickCount();
+            did_work = true;
+        }
+
+        while (ds5_audio_mailbox_try_receive_microphone_stream_active(
+            &newest_microphone_state)) {
+            microphone_stream_enabled = newest_microphone_state;
+            pending_microphone_state = true;
             did_work = true;
         }
 
@@ -887,15 +1038,67 @@ static void ds5_bt_tx_worker(void *parameter)
             }
         }
 
-        if (ds5_haptics_mailbox_try_receive(haptics_data,
+        if (pending_microphone_state && ds5_bt_interrupt_ready()) {
+            if (ds5_bt_send_microphone_status(microphone_stream_enabled,
+                                               bt_transaction,
+                                               sizeof(bt_transaction))) {
+                pending_microphone_state = false;
+                did_work = true;
+            }
+        }
+
+        if (pending_feature_set && control_channel_ready) {
+            if (ds5_bt_send_feature_set(&feature_set_request,
+                                        bt_transaction,
+                                        sizeof(bt_transaction))) {
+                pending_feature_set = false;
+                did_work = true;
+            }
+        }
+
+        if (!pending_haptics &&
+            ds5_haptics_mailbox_try_receive(haptics_data,
                                             sizeof(haptics_data))) {
             did_work = true;
             if (ds5_bt_interrupt_ready()) {
-                ds5_bt_forward_haptics(haptics_data, bt_transaction,
-                                       sizeof(bt_transaction));
+                pending_haptics = true;
             } else {
                 ++discarded_haptics_not_ready;
             }
+        }
+
+        if (!ds5_audio_mailbox_speaker_stream_active()) {
+            uint8_t discarded_speaker_frame[DS5_AUDIO_SPEAKER_OPUS_SIZE];
+
+            speaker_frame_count = 0U;
+            while (ds5_audio_mailbox_try_receive_speaker_opus(
+                discarded_speaker_frame, sizeof(discarded_speaker_frame))) {
+                did_work = true;
+            }
+        } else {
+            while ((speaker_frame_count < DS5_BT_AUDIO_SPEAKER_FRAME_COUNT) &&
+                   ds5_audio_mailbox_try_receive_speaker_opus(
+                       &speaker_opus_data[speaker_frame_count *
+                                          DS5_AUDIO_SPEAKER_OPUS_SIZE],
+                       DS5_AUDIO_SPEAKER_OPUS_SIZE)) {
+                ++speaker_frame_count;
+                did_work = true;
+            }
+        }
+
+        if (pending_haptics && ds5_bt_interrupt_ready() &&
+            (!ds5_audio_mailbox_speaker_stream_active() ||
+             (speaker_frame_count == DS5_BT_AUDIO_SPEAKER_FRAME_COUNT))) {
+            ds5_bt_forward_audio(
+                haptics_data, microphone_stream_enabled,
+                ds5_audio_mailbox_speaker_stream_active() ? speaker_opus_data :
+                                                            NULL,
+                ds5_audio_mailbox_speaker_stream_active() ?
+                    sizeof(speaker_opus_data) : 0U,
+                bt_transaction, sizeof(bt_transaction));
+            pending_haptics = false;
+            speaker_frame_count = 0U;
+            did_work = true;
         }
 
         if (pending_usb_output) {
