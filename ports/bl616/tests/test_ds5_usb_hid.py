@@ -92,23 +92,11 @@ class Ds5UsbHidTests(unittest.TestCase):
             "USB interrupt transport includes the report ID", source
         )
         self.assertIn(
-            "hid_receive_report, (size_t)transferred_bytes", source
+            "ds5_usb_hid_publish_output(hid_receive_report", source
         )
         self.assertNotIn(
             "hid_receive_report[0] != DS5_USB_OUTPUT_REPORT_ID",
             source,
-        )
-
-    def test_hid_out_trace_is_copied_in_callback_and_logged_by_task(self):
-        source = HID_SOURCE.read_text(encoding="utf-8")
-
-        self.assertIn("DS5_USB_HID_OUTPUT_TRACE_LIMIT", source)
-        self.assertIn("ds5_usb_hid_note_output_trace", source)
-        self.assertIn("DS5 USB: OUT trace", source)
-        self.assertIn("DS5 USB: state flags", source)
-        self.assertLess(
-            source.index("ds5_usb_hid_note_output_trace"),
-            source.index("static void ds5_usb_hid_task"),
         )
 
     def test_native_dualsense_descriptor_uses_hid_and_full_duplex_audio(self):
@@ -162,7 +150,7 @@ class Ds5UsbHidTests(unittest.TestCase):
         self.assertNotIn("malloc(", source)
         self.assertNotIn("free(", source)
 
-    def test_feature_set_report_is_bridged_but_local_audio_diag_is_not(self):
+    def test_feature_set_report_is_bridged(self):
         source = HID_SOURCE.read_text(encoding="utf-8")
         publish_start = source.index("static bool ds5_usb_hid_publish_feature_set(")
         publish_end = source.index("static void ds5_usb_hid_task(", publish_start)
@@ -174,10 +162,8 @@ class Ds5UsbHidTests(unittest.TestCase):
         self.assertIn("report_type == HID_REPORT_FEATURE", callback)
         self.assertIn("ds5_usb_hid_publish_feature_set", callback)
         self.assertIn("ds5_feature_set_mailbox_publish", publish)
-        self.assertIn("ds5_feature_set_mailbox_note_received", publish)
         self.assertIn("length == (DS5_FEATURE_SET_MAX_PAYLOAD + 1U)", publish)
         self.assertIn("payload = &report[1]", publish)
-        self.assertIn("DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_ID", publish)
         self.assertLess(
             callback.index("report_type == HID_REPORT_FEATURE"),
             callback.index("report_type != HID_REPORT_OUTPUT"),

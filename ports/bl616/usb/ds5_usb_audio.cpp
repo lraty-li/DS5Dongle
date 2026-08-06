@@ -15,7 +15,6 @@
 #include "usbd_core.h"
 
 #include "ds5_audio_mailbox.h"
-#include "ds5_feature_set_mailbox.h"
 #include "ds5_haptics_mailbox.h"
 #include "ds5_log.h"
 #include "ds5_protocol.h"
@@ -107,14 +106,6 @@ static void ds5_usb_audio_write_s16_le(uint8_t *data, int16_t value)
     data[1] = (uint8_t)(raw_value >> 8U);
 }
 
-static void ds5_usb_audio_write_u32_le(uint8_t *data, uint32_t value)
-{
-    data[0] = (uint8_t)(value & 0xffU);
-    data[1] = (uint8_t)((value >> 8U) & 0xffU);
-    data[2] = (uint8_t)((value >> 16U) & 0xffU);
-    data[3] = (uint8_t)((value >> 24U) & 0xffU);
-}
-
 static int8_t ds5_usb_audio_float_to_s8(WDL_ResampleSample sample)
 {
     int value = (int)(sample * 127.0);
@@ -201,63 +192,6 @@ extern "C" void ds5_usb_audio_on_in_complete(uint8_t busid,
     (void)transferred_bytes;
 
     microphone_write_pending = false;
-}
-
-extern "C" size_t ds5_usb_audio_get_diagnostic_feature(uint8_t *data,
-                                                         size_t capacity)
-{
-    uint8_t flags = 0U;
-
-    if ((data == NULL) ||
-        (capacity < DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_SIZE)) {
-        return 0U;
-    }
-
-    memset(data, 0, DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_SIZE);
-    data[0] = 'D';
-    data[1] = '5';
-    data[2] = 'A';
-    data[3] = 'D';
-    data[4] = 0x01U;
-    if (speaker_stream_open) {
-        flags |= 0x01U;
-    }
-    if (microphone_stream_open) {
-        flags |= 0x02U;
-    }
-    if (audio_read_pending) {
-        flags |= 0x04U;
-    }
-    if (microphone_write_pending) {
-        flags |= 0x08U;
-    }
-    if (speaker_muted) {
-        flags |= 0x10U;
-    }
-    if (microphone_muted) {
-        flags |= 0x20U;
-    }
-    data[5] = flags;
-    ds5_usb_audio_write_u32_le(&data[8], received_audio_packets);
-    ds5_usb_audio_write_u32_le(&data[12], invalid_audio_packets);
-    ds5_usb_audio_write_u32_le(&data[16], dropped_audio_packets);
-    ds5_usb_audio_write_u32_le(&data[20], audio_arm_failures);
-    ds5_usb_audio_write_u32_le(&data[24], published_haptics_blocks);
-    ds5_usb_audio_write_u32_le(&data[28], published_speaker_frames);
-    ds5_usb_audio_write_u32_le(&data[32], decoded_microphone_frames);
-    ds5_usb_audio_write_u32_le(&data[36], microphone_write_failures);
-    ds5_usb_audio_write_u32_le(&data[40], audio_generation);
-    ds5_usb_audio_write_u32_le(
-        &data[44], ds5_feature_set_mailbox_received_count());
-    ds5_usb_audio_write_u32_le(
-        &data[48], ds5_feature_set_mailbox_dropped_count());
-    ds5_usb_audio_write_u32_le(
-        &data[52], ds5_feature_set_mailbox_forwarded_count());
-    ds5_usb_audio_write_u32_le(
-        &data[56], ds5_feature_set_mailbox_forward_failed_count());
-    data[60] = ds5_feature_set_mailbox_last_report_id();
-    data[61] = ds5_feature_set_mailbox_last_payload_length();
-    return DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_SIZE;
 }
 
 static bool ds5_usb_audio_init_codecs(OpusEncoder **encoder,

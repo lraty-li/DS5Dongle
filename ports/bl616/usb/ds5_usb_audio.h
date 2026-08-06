@@ -1,7 +1,6 @@
 #ifndef DS5_USB_AUDIO_H
 #define DS5_USB_AUDIO_H
 
-#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -22,8 +21,6 @@ extern "C" {
 #define DS5_USB_AUDIO_MICROPHONE_PACKET_BYTES 192U
 /* AudioControl plus the two AudioStreaming interface descriptor blocks. */
 #define DS5_USB_AUDIO_CONFIG_DESCRIPTOR_SIZE 186U
-#define DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_ID 0xf6U
-#define DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_SIZE 63U
 
 int ds5_usb_audio_init(uint8_t busid);
 void ds5_usb_audio_deinit(void);
@@ -48,7 +45,6 @@ void ds5_usb_audio_on_out_complete(uint8_t busid, uint8_t endpoint,
                                    uint32_t transferred_bytes);
 void ds5_usb_audio_on_in_complete(uint8_t busid, uint8_t endpoint,
                                   uint32_t transferred_bytes);
-size_t ds5_usb_audio_get_diagnostic_feature(uint8_t *data, size_t capacity);
 
 #ifdef __cplusplus
 }

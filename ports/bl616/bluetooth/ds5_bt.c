@@ -960,7 +960,6 @@ static bool ds5_bt_send_feature_set(
         bt_transaction, bt_transaction_capacity, &transaction_length);
     if (protocol_result != DS5_PROTOCOL_OK) {
         ++failed_feature_set_reports;
-        ds5_feature_set_mailbox_note_forward_failed();
         printf("DS5 BT: Feature SET 0x%02x rejected (result %d)\r\n",
                (unsigned int)request->report_id, (int)protocol_result);
         return false;
@@ -970,7 +969,6 @@ static bool ds5_bt_send_feature_set(
                                  bt_transaction, transaction_length);
     if (send_result < 0) {
         ++failed_feature_set_reports;
-        ds5_feature_set_mailbox_note_forward_failed();
         if (failed_feature_set_reports <= 4U) {
             printf("DS5 BT: Feature SET 0x%02x send failed (err %d)\r\n",
                    (unsigned int)request->report_id, send_result);
@@ -979,7 +977,6 @@ static bool ds5_bt_send_feature_set(
     }
 
     ++transmitted_feature_set_reports;
-    ds5_feature_set_mailbox_note_forwarded();
     printf("DS5 BT: Feature SET 0x%02x forwarded, payload %u, total %lu\r\n",
            (unsigned int)request->report_id,
            (unsigned int)request->payload_length,

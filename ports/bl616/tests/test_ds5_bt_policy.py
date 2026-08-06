@@ -172,8 +172,6 @@ class Ds5BtPolicyTests(unittest.TestCase):
         self.assertIn("ds5_build_feature_set_transaction", helper)
         self.assertIn("DS5_L2CAP_CHANNEL_CONTROL", helper)
         self.assertIn("ds5_l2cap_send", helper)
-        self.assertIn("ds5_feature_set_mailbox_note_forwarded", helper)
-        self.assertIn("ds5_feature_set_mailbox_note_forward_failed", helper)
         self.assertIn("ds5_feature_set_mailbox_try_receive", source)
 
 

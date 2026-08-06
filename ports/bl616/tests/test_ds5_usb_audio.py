@@ -93,23 +93,6 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("usbd_audio_close", adapter)
         self.assertIn("usbd_audio_init_intf", adapter)
 
-    def test_diagnostic_feature_observes_audio_pipeline_without_new_endpoint(self):
-        header = AUDIO_HEADER.read_text(encoding="utf-8")
-        audio = AUDIO_SOURCE.read_text(encoding="utf-8")
-        hid = (BL616_DIR / "usb" / "ds5_usb_hid.c").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_ID", header)
-        self.assertIn("0xf6U", header)
-        self.assertIn("ds5_usb_audio_get_diagnostic_feature", audio)
-        self.assertIn("received_audio_packets", audio)
-        self.assertIn("published_speaker_frames", audio)
-        self.assertIn("ds5_feature_set_mailbox_received_count", audio)
-        self.assertIn("ds5_feature_set_mailbox_forwarded_count", audio)
-        self.assertIn("DS5_USB_AUDIO_DIAGNOSTIC_FEATURE_REPORT_ID", hid)
-        self.assertIn("hid_audio_diagnostic", hid)
-
     def test_audio_and_haptics_mailboxes_are_static_and_bounded(self):
         audio_source = AUDIO_MAILBOX.read_text(encoding="utf-8")
         haptics_source = HAPTICS_MAILBOX.read_text(encoding="utf-8")
