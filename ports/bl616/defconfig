@@ -10,6 +10,10 @@ CONFIG_SCANF_FLOAT_EX       =y
 
 CONFIG_BFLB_LOG              =n
 
+# SDK's make entry defaults to -Os (size); Opus float encoding needs speed.
+# -O2 matches the SDK cmake default and the working master (Pico) build.
+CONFIG_GCC_OPTIMISE_LEVEL    =-O2
+
 CONFIG_FREERTOS              =y
 CONFIG_BLUETOOTH             =y
 CONFIG_RF                    =y

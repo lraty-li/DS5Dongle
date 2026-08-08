@@ -1272,6 +1272,17 @@ bool ds5_bt_candidate_available(void)
     return candidate.valid;
 }
 
+int ds5_bt_fallback_to_discovery(void)
+{
+    if (bluetooth_state != DS5_BT_STATE_RECONNECT_WAIT) {
+        return -EBUSY;
+    }
+
+    printf("DS5 BT: reconnect wait timed out; switching to discovery\r\n");
+    ds5_bt_set_state(DS5_BT_STATE_IDLE);
+    return ds5_bt_start_discovery();
+}
+
 int ds5_bt_connect_candidate(void)
 {
     static const struct bt_br_conn_param connection_param = {

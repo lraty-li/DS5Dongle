@@ -21,8 +21,13 @@
 #define CONFIG_USBHOST_MAX_ENDPOINTS        4
 #define CONFIG_USBHOST_DEV_NAMELEN          16
 
-/* BL616's USB v2 controller and the local SDK example both use HS mode. */
-#define CONFIG_USB_HS
+/*
+ * Full Speed mode: the real DualSense is FS-only and host capture shows
+ * HS iso OUT URBs returning USBD_STATUS_INVALID_PARAMETER, killing the
+ * audio stream.  Undefining CONFIG_USB_HS makes bflb_usb_v2.c set
+ * USB_FORCE_FS so iso scheduling matches the wired DualSense.
+ */
+/* #define CONFIG_USB_HS */
 
 #ifndef usb_phyaddr2ramaddr
 #define usb_phyaddr2ramaddr(address) (address)

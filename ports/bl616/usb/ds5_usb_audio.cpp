@@ -20,8 +20,22 @@
 #include "ds5_protocol.h"
 
 #define DS5_USB_AUDIO_QUEUE_LENGTH          8U
-#define DS5_USB_AUDIO_TASK_STACK_DEPTH      (configMINIMAL_STACK_SIZE * 12U)
-#define DS5_USB_AUDIO_TASK_PRIORITY         (configMAX_PRIORITIES - 3U)
+/*
+ * Opus 48 kHz stereo encoding runs the SILK float path
+ * (silk_encode_frame_FLP 13728 B + silk_pitch_analysis_core_FLP 11712 B,
+ * measured with -fstack-usage on the pinned toolchain), so the audio task
+ * needs the same budget as the original src/audio.cpp core1 stack (28 KB).
+ * A 6 KB stack overflows on the first encode: host capture showed the FS
+ * audio stream flowing while the firmware crashed (BT dropped and never
+ * reconnected).
+ */
+#define DS5_USB_AUDIO_TASK_STACK_DEPTH      (configMINIMAL_STACK_SIZE * 64U)
+/*
+ * Below the Bluetooth workers (configMAX_PRIORITIES - 5): when encoding is
+ * momentarily slower than real time, BT keeps its latency instead of being
+ * starved, and the audio mailbox drops the oldest frame (latest wins).
+ */
+#define DS5_USB_AUDIO_TASK_PRIORITY         (configMAX_PRIORITIES - 6U)
 #define DS5_USB_AUDIO_LOG_INTERVAL          4096U
 #define DS5_USB_AUDIO_HAPTICS_CHANNELS      2U
 #define DS5_USB_AUDIO_HAPTICS_MAX_FRAMES    8U
@@ -219,6 +233,11 @@ static bool ds5_usb_audio_init_codecs(OpusEncoder **encoder,
     *encoder = reinterpret_cast<OpusEncoder *>(opus_encoder_storage);
     *decoder = reinterpret_cast<OpusDecoder *>(opus_decoder_storage);
 
+    /*
+     * Hybrid (SILK+CELT) is required: the DualSense speaker decoder rejects
+     * CELT-only streams (audio was garbled).  With -O2 (CONFIG_GCC_OPTIMISE_LEVEL)
+     * the 48 kHz float encode fits the BL616 320 MHz real-time budget.
+     */
     result = opus_encoder_init(*encoder, DS5_AUDIO_SAMPLE_RATE,
                                DS5_AUDIO_SPEAKER_CHANNELS,
                                OPUS_APPLICATION_AUDIO);

@@ -31,6 +31,13 @@ int ds5_bt_clear_pairing(void);
 ds5_bt_state_t ds5_bt_get_state(void);
 uint32_t ds5_bt_received_l2cap_packet_count(void);
 
+/*
+ * Leave RECONNECT_WAIT after a timeout and fall back to active discovery +
+ * connection.  The saved bond is kept; reconnecting uses the existing link
+ * key, and an invalidated key falls back to fresh pairing.
+ */
+int ds5_bt_fallback_to_discovery(void);
+
 #ifdef __cplusplus
 }
 #endif
