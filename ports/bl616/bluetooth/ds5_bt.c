@@ -112,6 +112,15 @@ static TaskHandle_t worker_task;
 static StaticTask_t tx_worker_task_storage;
 static StackType_t tx_worker_task_stack[DS5_BT_TX_WORKER_STACK_DEPTH];
 static TaskHandle_t tx_worker_task;
+static volatile uint16_t worker_task_stack_high_water_words;
+static volatile uint16_t tx_worker_task_stack_high_water_words;
+
+static uint16_t ds5_bt_current_stack_high_water_words(void)
+{
+    UBaseType_t words = uxTaskGetStackHighWaterMark(NULL);
+
+    return words > UINT16_MAX ? UINT16_MAX : (uint16_t)words;
+}
 
 static const char *ds5_bt_state_name(ds5_bt_state_t state)
 {
@@ -755,12 +764,18 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
 static void ds5_bt_worker(void *parameter)
 {
     ds5_l2cap_event_t event;
+    uint32_t diagnostic_event_count = 0U;
 
     (void)parameter;
 
     while (1) {
         if (ds5_l2cap_event_receive(&event)) {
             ds5_bt_process_l2cap_event(&event);
+            ++diagnostic_event_count;
+            if ((diagnostic_event_count & 0x3fU) == 1U) {
+                worker_task_stack_high_water_words =
+                    ds5_bt_current_stack_high_water_words();
+            }
         }
     }
 }
@@ -771,7 +786,7 @@ static bool ds5_bt_interrupt_ready(void)
            interrupt_channel_ready;
 }
 
-static void ds5_bt_forward_usb_output(
+static bool ds5_bt_forward_usb_output(
     const uint8_t *usb_report,
     uint8_t *bt_transaction,
     size_t bt_transaction_capacity)
@@ -780,6 +795,11 @@ static void ds5_bt_forward_usb_output(
     ds5_protocol_result_t protocol_result;
     ds5_output_sequence_t previous_sequence = output_sequence;
     int send_result;
+
+    if (usb_report == NULL) {
+        ++failed_output_reports;
+        return false;
+    }
 
     protocol_result = ds5_build_bt_output_transaction(
         &output_sequence, usb_report, DS5_USB_OUTPUT_REPORT_SIZE,
@@ -790,7 +810,7 @@ static void ds5_bt_forward_usb_output(
             printf("DS5 BT: USB output report rejected (result %d)\r\n",
                    (int)protocol_result);
         }
-        return;
+        return false;
     }
 
     send_result = ds5_l2cap_send(DS5_L2CAP_CHANNEL_INTERRUPT,
@@ -802,7 +822,7 @@ static void ds5_bt_forward_usb_output(
             printf("DS5 BT: HID output send failed (err %d)\r\n",
                    send_result);
         }
-        return;
+        return false;
     }
 
     ++transmitted_output_reports;
@@ -815,6 +835,7 @@ static void ds5_bt_forward_usb_output(
                (unsigned long)failed_output_reports);
     }
 
+    return true;
 }
 
 static bool ds5_bt_send_initialization(uint8_t *bt_transaction,
@@ -909,6 +930,7 @@ static void ds5_bt_forward_audio(
                (unsigned long)failed_haptics_reports,
                (unsigned long)ds5_haptics_mailbox_dropped_count());
     }
+
 }
 
 static bool ds5_bt_send_microphone_status(
@@ -998,6 +1020,7 @@ static void ds5_bt_tx_worker(void *parameter)
     bool pending_microphone_state = false;
     bool pending_feature_set = false;
     size_t speaker_frame_count = 0U;
+    uint32_t diagnostic_iteration_count = 0U;
 
     (void)parameter;
 
@@ -1005,6 +1028,12 @@ static void ds5_bt_tx_worker(void *parameter)
         bool did_work = false;
         uint8_t newer_report[DS5_USB_OUTPUT_REPORT_SIZE];
         bool newest_microphone_state;
+
+        ++diagnostic_iteration_count;
+        if ((diagnostic_iteration_count & 0x3ffU) == 1U) {
+            tx_worker_task_stack_high_water_words =
+                ds5_bt_current_stack_high_water_words();
+        }
 
         if (!pending_feature_set &&
             ds5_feature_set_mailbox_try_receive(&feature_set_request)) {
@@ -1100,10 +1129,12 @@ static void ds5_bt_tx_worker(void *parameter)
 
         if (pending_usb_output) {
             if (ds5_bt_interrupt_ready()) {
-                ds5_bt_forward_usb_output(usb_report, bt_transaction,
-                                          sizeof(bt_transaction));
-                pending_usb_output = false;
-                did_work = true;
+                if (ds5_bt_forward_usb_output(
+                        usb_report, bt_transaction,
+                        sizeof(bt_transaction))) {
+                    pending_usb_output = false;
+                    did_work = true;
+                }
             } else if ((xTaskGetTickCount() - pending_usb_output_since) >=
                        pdMS_TO_TICKS(DS5_BT_OUTPUT_READY_TIMEOUT_MS)) {
                 ++failed_output_reports;
@@ -1221,6 +1252,9 @@ static void ds5_bt_ready(int err)
 int ds5_bt_init(void)
 {
     int err;
+
+    worker_task_stack_high_water_words = 0U;
+    tx_worker_task_stack_high_water_words = 0U;
 
     printf("DS5 BT: initializing controller\r\n");
     btble_controller_init(configMAX_PRIORITIES - 1U);
@@ -1367,4 +1401,19 @@ ds5_bt_state_t ds5_bt_get_state(void)
 uint32_t ds5_bt_received_l2cap_packet_count(void)
 {
     return received_l2cap_packets;
+}
+
+void ds5_bt_get_diagnostics(ds5_bt_diagnostics_t *diagnostics)
+{
+    if (diagnostics == NULL) {
+        return;
+    }
+
+    diagnostics->state = bluetooth_state;
+    diagnostics->control_channel_ready = control_channel_ready;
+    diagnostics->interrupt_channel_ready = interrupt_channel_ready;
+    diagnostics->worker_task_stack_high_water_words =
+        worker_task_stack_high_water_words;
+    diagnostics->tx_worker_task_stack_high_water_words =
+        tx_worker_task_stack_high_water_words;
 }

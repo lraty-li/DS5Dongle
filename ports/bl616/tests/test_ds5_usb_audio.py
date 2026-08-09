@@ -52,7 +52,7 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("USB_NOCACHE_RAM_SECTION", source)
         self.assertIn("xQueueCreateStatic", source)
         self.assertIn("xTaskCreateStatic", source)
-        self.assertIn("WDL_Resampler", source)
+        self.assertNotIn("WDL_Resampler", source)
         self.assertIn("opus_encoder_get_size", source)
         self.assertIn("opus_encoder_init", source)
         self.assertIn("opus_decoder_get_size", source)
@@ -76,6 +76,25 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("ds5_haptics_mailbox_publish", source)
         self.assertIn("ds5_audio_mailbox_publish_speaker_opus", source)
 
+    def test_realtime_ingress_is_decoupled_from_opus_encoding(self):
+        source = AUDIO_SOURCE.read_text(encoding="utf-8")
+        ingress_start = source.index("static void ds5_usb_audio_task(")
+        codec_start = source.index("static void ds5_usb_codec_task(")
+        ingress_task = source[ingress_start:codec_start]
+
+        self.assertIn("DS5_USB_AUDIO_QUEUE_LENGTH          4U", source)
+        self.assertIn("DS5_USB_SPEAKER_QUEUE_LENGTH        1U", source)
+        self.assertIn("DS5_USB_AUDIO_HAPTICS_DECIMATION    16U", source)
+        self.assertIn("DS5_USB_AUDIO_SPEAKER_INPUT_STEP    16U", source)
+        self.assertIn("DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP   15U", source)
+        self.assertIn("xQueueReceive(audio_queue, &packet, portMAX_DELAY)", source)
+        self.assertIn("ds5_usb_audio_queue_speaker_frame(packet->generation)", source)
+        self.assertIn("xQueueReceiveFromISR(audio_queue", source)
+        self.assertIn("DS5_USB_AUDIO_TASK_PRIORITY", source)
+        self.assertIn("DS5_USB_CODEC_TASK_PRIORITY", source)
+        self.assertNotIn("opus_encode", ingress_task)
+        self.assertNotIn("opus_decode", ingress_task)
+
     def test_full_duplex_endpoints_are_armed_and_streams_control_bt(self):
         source = AUDIO_SOURCE.read_text(encoding="utf-8")
         adapter = ADAPTER_SOURCE.read_text(encoding="utf-8")
@@ -97,13 +116,13 @@ class Ds5UsbAudioTests(unittest.TestCase):
         audio_source = AUDIO_MAILBOX.read_text(encoding="utf-8")
         haptics_source = HAPTICS_MAILBOX.read_text(encoding="utf-8")
 
-        self.assertIn("DS5_AUDIO_SPEAKER_MAILBOX_LENGTH    4U", audio_source)
+        self.assertIn("DS5_AUDIO_SPEAKER_MAILBOX_LENGTH    2U", audio_source)
         self.assertIn("DS5_AUDIO_MICROPHONE_MAILBOX_LENGTH 8U", audio_source)
         self.assertIn("xQueueCreateStatic", audio_source)
         self.assertIn("xQueueOverwrite", audio_source)
         self.assertNotIn("malloc(", audio_source)
         self.assertNotIn("free(", audio_source)
-        self.assertIn("DS5_HAPTICS_MAILBOX_LENGTH 4U", haptics_source)
+        self.assertIn("DS5_HAPTICS_MAILBOX_LENGTH 1U", haptics_source)
         self.assertIn("xQueueCreateStatic", haptics_source)
 
     def test_bluetooth_uses_native_audio_and_microphone_contract(self):
@@ -116,6 +135,16 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("&event->data[4]", source)
         self.assertIn("DS5_AUDIO_MIC_OPUS_SIZE", source)
         self.assertIn("DS5_BT_AUDIO_SPEAKER_FRAME_COUNT", source)
+
+    def test_bluetooth_drops_stale_audio_but_retries_latest_state(self):
+        source = BT_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("static void ds5_bt_forward_audio(", source)
+        self.assertIn("static bool ds5_bt_forward_usb_output(", source)
+        self.assertNotIn("if (ds5_bt_forward_audio(", source)
+        self.assertIn("if (ds5_bt_forward_usb_output(", source)
+        self.assertIn("pending_haptics = false;", source)
+        self.assertNotIn("DS5_BT_DEFAULT_SPEAKER_PREGAIN", source)
 
     def test_native_hid_uac_uses_each_bl616_endpoint_number_once(self):
         audio = numeric_macros(AUDIO_HEADER)
@@ -149,18 +178,47 @@ class Ds5UsbAudioTests(unittest.TestCase):
         )
         self.assertRegex(source, r"#define\s+DS5_L2CAP_MTU\s+672U")
 
-    def test_build_includes_fixed_opus_sources_without_subproject(self):
+    def test_build_uses_repository_opus_fixed_point_backend(self):
         cmake = CMAKE_PATH.read_text(encoding="utf-8")
         defconfig = DEFCONFIG_PATH.read_text(encoding="utf-8")
 
         self.assertIn("CONFIG_CHERRYUSB_DEVICE_AUDIO =y", defconfig)
         self.assertIn("CONFIG_BT_L2CAP_TX_MTU       =672", defconfig)
-        self.assertIn("../../lib/WDL/WDL/resample.cpp", cmake)
+        self.assertNotIn("CONFIG_MULTIMEDIA            =y", defconfig)
+        self.assertNotIn("CONFIG_OPUS                  =y", defconfig)
+        self.assertNotIn("../../lib/WDL/WDL/resample.cpp", cmake)
         self.assertIn("OpusFunctions.cmake", cmake)
+        self.assertIn("SILK_SOURCES_FIXED", cmake)
         self.assertIn("${DS5_OPUS_SOURCES}", cmake)
-        self.assertIn("OPUS_BUILD;VAR_ARRAYS", cmake)
+        self.assertIn("FIXED_POINT;DISABLE_FLOAT_API", cmake)
+        self.assertNotIn("DS5_OPUS_FLOAT_SOURCES", cmake)
+        self.assertNotIn("DS5_OPUS_SILK_FLOAT_SOURCES", cmake)
         self.assertIn("usb/ds5_usb_audio_adapter.c", cmake)
-        self.assertNotIn("add_subdirectory(${DS5_OPUS_ROOT}", cmake)
+
+    def test_celt_encoder_hot_path_is_linked_into_on_chip_ram(self):
+        cmake = CMAKE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("DS5_OPUS_TCM_OBJECTS", cmake)
+        self.assertIn("ds5_usb_audio.cpp.obj", cmake)
+        self.assertIn("opus_encoder.c.obj", cmake)
+        self.assertIn("celt_encoder.c.obj", cmake)
+        self.assertIn("bands.c.obj", cmake)
+        self.assertIn("modes.c.obj", cmake)
+        self.assertIn("*libapp.a:${DS5_APP_TCM_OBJECT}(.text*)", cmake)
+        self.assertIn("*libapp.a:${DS5_OPUS_TCM_OBJECT}(.text*)", cmake)
+        self.assertIn("*libapp.a:${DS5_OPUS_TCM_OBJECT}(.rodata*)", cmake)
+        self.assertIn(
+            "sdk_set_linker_script_macro(${DS5_LINKER_SCRIPT})", cmake
+        )
+
+    def test_speaker_path_stays_int16_into_fixed_point_opus(self):
+        source = AUDIO_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn('#include "opus.h"', source)
+        self.assertIn("static int16_t speaker_opus_input", source)
+        self.assertIn("int16_t *speaker_data", source)
+        self.assertIn("encoded_length = opus_encode(", source)
+        self.assertNotIn("opus_encode_float(", source)
 
 
 if __name__ == "__main__":

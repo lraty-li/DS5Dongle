@@ -5,7 +5,7 @@
 
 #include "ds5_protocol.h"
 
-#define DS5_HAPTICS_MAILBOX_LENGTH 4U
+#define DS5_HAPTICS_MAILBOX_LENGTH 1U
 
 static StaticQueue_t haptics_queue_storage;
 static uint8_t haptics_queue_buffer[DS5_HAPTICS_MAILBOX_LENGTH *

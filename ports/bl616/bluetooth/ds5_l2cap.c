@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include <FreeRTOS.h>
+#include "bflb_mtimer.h"
 #include "queue.h"
 
 #include "l2cap.h"
@@ -15,8 +16,14 @@
  * pool and applies the HCI headroom; the extra reserve below is for L2CAP.
  */
 #include "conn_internal.h"
+#include "hci_core.h"
+#include "l2cap_internal.h"
+
+#include "ds5_protocol.h"
 
 #define DS5_L2CAP_EVENT_QUEUE_LENGTH 8U
+#define DS5_L2CAP_COMPLETION_SAMPLE_INTERVAL 8U
+#define DS5_L2CAP_COMPLETION_SAMPLE_SLOTS    4U
 
 typedef enum {
     DS5_L2CAP_INIT_NONE = 0,
@@ -36,6 +43,142 @@ static QueueHandle_t event_queue;
 static ds5_l2cap_init_state_t init_state;
 static bool outgoing_channel_sequence;
 static volatile uint32_t dropped_event_count;
+
+typedef struct {
+    volatile bool pending;
+    uint64_t submitted_at_us;
+} ds5_l2cap_completion_sample_t;
+
+static ds5_l2cap_completion_sample_t
+    completion_samples[DS5_L2CAP_COMPLETION_SAMPLE_SLOTS];
+static volatile uint32_t audio_send_attempts;
+static volatile uint32_t audio_send_accepted;
+static volatile uint32_t audio_send_immediate_failures;
+static volatile uint32_t audio_send_enobufs;
+static volatile uint32_t max_audio_submit_interval_us;
+static volatile uint32_t hci_zero_slot_observations;
+static volatile uint32_t completion_samples_submitted;
+static volatile uint32_t completion_samples_completed;
+static volatile uint32_t last_completion_latency_us;
+static volatile uint32_t max_completion_latency_us;
+static volatile uint32_t average_completion_latency_us;
+static volatile uint8_t hci_max_free_packets;
+static volatile uint8_t hci_min_free_packets;
+static volatile uint8_t last_hci_free_packets;
+static volatile uint8_t last_connection_tx_queue_depth;
+static volatile uint8_t max_connection_tx_queue_depth;
+static uint64_t last_audio_submit_us;
+
+static uint8_t ds5_l2cap_bounded_u8(unsigned int value)
+{
+    return value > UINT8_MAX ? UINT8_MAX : (uint8_t)value;
+}
+
+static uint32_t ds5_l2cap_bounded_u32(uint64_t value)
+{
+    return value > UINT32_MAX ? UINT32_MAX : (uint32_t)value;
+}
+
+static void ds5_l2cap_audio_completed(struct bt_conn *conn, void *user_data)
+{
+    ds5_l2cap_completion_sample_t *sample = user_data;
+    uint32_t latency_us;
+    uint32_t next_count;
+    uint32_t current_average;
+
+    (void)conn;
+
+    if ((sample == NULL) || !sample->pending) {
+        return;
+    }
+
+    latency_us = ds5_l2cap_bounded_u32(
+        bflb_mtimer_get_time_us() - sample->submitted_at_us);
+    last_completion_latency_us = latency_us;
+    if (latency_us > max_completion_latency_us) {
+        max_completion_latency_us = latency_us;
+    }
+
+    next_count = completion_samples_completed + 1U;
+    current_average = average_completion_latency_us;
+    if (next_count == 1U) {
+        average_completion_latency_us = latency_us;
+    } else if (latency_us >= current_average) {
+        average_completion_latency_us = current_average +
+            ((latency_us - current_average) / next_count);
+    } else {
+        average_completion_latency_us = current_average -
+            ((current_average - latency_us) / next_count);
+    }
+    completion_samples_completed = next_count;
+    __sync_synchronize();
+    sample->pending = false;
+}
+
+static ds5_l2cap_completion_sample_t *
+ds5_l2cap_claim_completion_sample(void)
+{
+    size_t index;
+
+    for (index = 0U; index < DS5_L2CAP_COMPLETION_SAMPLE_SLOTS; ++index) {
+        if (!completion_samples[index].pending) {
+            completion_samples[index].submitted_at_us =
+                bflb_mtimer_get_time_us();
+            __sync_synchronize();
+            completion_samples[index].pending = true;
+            return &completion_samples[index];
+        }
+    }
+
+    return NULL;
+}
+
+static void ds5_l2cap_observe_audio_submission(struct bt_conn *conn)
+{
+    uint64_t now_us = bflb_mtimer_get_time_us();
+    uint8_t free_packets = ds5_l2cap_bounded_u8(
+        k_sem_count_get(&bt_dev.br.pkts));
+    uint8_t queue_depth = 0U;
+
+    if (last_audio_submit_us != 0U) {
+        uint32_t interval_us = ds5_l2cap_bounded_u32(
+            now_us - last_audio_submit_us);
+
+        if (interval_us > max_audio_submit_interval_us) {
+            max_audio_submit_interval_us = interval_us;
+        }
+    }
+    last_audio_submit_us = now_us;
+
+    if (free_packets > hci_max_free_packets) {
+        hci_max_free_packets = free_packets;
+    }
+    if (free_packets < hci_min_free_packets) {
+        hci_min_free_packets = free_packets;
+    }
+    if (free_packets == 0U) {
+        ++hci_zero_slot_observations;
+    }
+    last_hci_free_packets = free_packets;
+
+    if (conn != NULL) {
+        queue_depth = ds5_l2cap_bounded_u8(
+            (unsigned int)k_queue_get_cnt(
+                (struct k_queue *)&conn->tx_queue));
+        if (queue_depth > max_connection_tx_queue_depth) {
+            max_connection_tx_queue_depth = queue_depth;
+        }
+    }
+    last_connection_tx_queue_depth = queue_depth;
+}
+
+static void ds5_l2cap_record_audio_failure(int error)
+{
+    ++audio_send_immediate_failures;
+    if (error == -ENOBUFS) {
+        ++audio_send_enobufs;
+    }
+}
 
 static ds5_l2cap_channel_t ds5_l2cap_channel_id(
     const struct bt_l2cap_chan *channel)
@@ -111,6 +254,7 @@ static void ds5_l2cap_connected(struct bt_l2cap_chan *channel)
         }
     } else if (channel_id == DS5_L2CAP_CHANNEL_INTERRUPT) {
         outgoing_channel_sequence = false;
+        last_audio_submit_us = 0U;
     }
 }
 
@@ -120,6 +264,8 @@ static void ds5_l2cap_disconnected(struct bt_l2cap_chan *channel)
 
     if (channel_id == DS5_L2CAP_CHANNEL_CONTROL) {
         outgoing_channel_sequence = false;
+    } else {
+        last_audio_submit_us = 0U;
     }
 
     ds5_l2cap_enqueue_event(DS5_L2CAP_EVENT_DISCONNECTED, channel_id, 0,
@@ -205,6 +351,24 @@ int ds5_l2cap_init(void)
     }
 
     if (init_state == DS5_L2CAP_INIT_NONE) {
+        memset(completion_samples, 0, sizeof(completion_samples));
+        audio_send_attempts = 0U;
+        audio_send_accepted = 0U;
+        audio_send_immediate_failures = 0U;
+        audio_send_enobufs = 0U;
+        max_audio_submit_interval_us = 0U;
+        hci_zero_slot_observations = 0U;
+        completion_samples_submitted = 0U;
+        completion_samples_completed = 0U;
+        last_completion_latency_us = 0U;
+        max_completion_latency_us = 0U;
+        average_completion_latency_us = 0U;
+        hci_max_free_packets = 0U;
+        hci_min_free_packets = UINT8_MAX;
+        last_hci_free_packets = 0U;
+        last_connection_tx_queue_depth = 0U;
+        max_connection_tx_queue_depth = 0U;
+        last_audio_submit_us = 0U;
         event_queue = xQueueCreateStatic(DS5_L2CAP_EVENT_QUEUE_LENGTH,
                                          sizeof(ds5_l2cap_event_t),
                                          event_queue_items,
@@ -296,40 +460,141 @@ int ds5_l2cap_send(ds5_l2cap_channel_t channel, const uint8_t *data,
 {
     struct bt_l2cap_br_chan *br_channel = ds5_l2cap_get_channel(channel);
     struct net_buf *buffer;
+    ds5_l2cap_completion_sample_t *completion_sample = NULL;
+    bool is_audio = (channel == DS5_L2CAP_CHANNEL_INTERRUPT) &&
+                    (length == DS5_BT_HAPTICS_TRANSACTION_SIZE);
+    bool callback_send = false;
     int result;
 
+    if (is_audio) {
+        ++audio_send_attempts;
+    }
+
     if ((br_channel == NULL) || (data == NULL) || (length == 0U)) {
+        if (is_audio) {
+            ds5_l2cap_record_audio_failure(-EINVAL);
+        }
         return -EINVAL;
     }
 
     if ((br_channel->chan.conn == NULL) ||
         (br_channel->chan.state != BT_L2CAP_CONNECTED)) {
+        if (is_audio) {
+            ds5_l2cap_record_audio_failure(-ENOTCONN);
+        }
         return -ENOTCONN;
+    }
+
+    if (is_audio) {
+        ds5_l2cap_observe_audio_submission(br_channel->chan.conn);
     }
 
     if ((length > br_channel->tx.mtu) ||
         (length > CONFIG_BT_L2CAP_TX_MTU)) {
+        if (is_audio) {
+            ds5_l2cap_record_audio_failure(-EMSGSIZE);
+        }
         return -EMSGSIZE;
     }
 
     buffer = bt_conn_create_pdu_timeout(NULL, BT_L2CAP_HDR_SIZE, K_NO_WAIT);
     if (buffer == NULL) {
+        if (is_audio) {
+            ds5_l2cap_record_audio_failure(-ENOBUFS);
+        }
         return -ENOBUFS;
     }
 
     if (net_buf_tailroom(buffer) < length) {
         net_buf_unref(buffer);
+        if (is_audio) {
+            ds5_l2cap_record_audio_failure(-EMSGSIZE);
+        }
         return -EMSGSIZE;
     }
 
     net_buf_add_mem(buffer, data, length);
-    result = bt_l2cap_chan_send(&br_channel->chan, buffer);
-    if (result < 0) {
+    if (is_audio &&
+        ((audio_send_attempts % DS5_L2CAP_COMPLETION_SAMPLE_INTERVAL) == 1U)) {
+        completion_sample = ds5_l2cap_claim_completion_sample();
+    }
+
+    if (completion_sample != NULL) {
+        callback_send = true;
+        result = bt_l2cap_send_cb(br_channel->chan.conn,
+                                  br_channel->tx.cid, buffer,
+                                  ds5_l2cap_audio_completed,
+                                  completion_sample);
+        if (result >= 0) {
+            ++completion_samples_submitted;
+        } else {
+            completion_sample->pending = false;
+        }
+    } else {
+        result = bt_l2cap_chan_send(&br_channel->chan, buffer);
+    }
+
+    if ((result < 0) && !callback_send) {
         /* BR/EDR rejects before queueing on every negative return path. */
         net_buf_unref(buffer);
     }
 
+    if (is_audio) {
+        if (result < 0) {
+            ds5_l2cap_record_audio_failure(result);
+        } else {
+            ++audio_send_accepted;
+        }
+    }
+
     return result;
+}
+
+void ds5_l2cap_get_diagnostics(ds5_l2cap_diagnostics_t *diagnostics)
+{
+    size_t index;
+    uint8_t busy_slots = 0U;
+
+    if (diagnostics == NULL) {
+        return;
+    }
+
+    for (index = 0U; index < DS5_L2CAP_COMPLETION_SAMPLE_SLOTS; ++index) {
+        if (completion_samples[index].pending) {
+            ++busy_slots;
+        }
+    }
+
+    diagnostics->hci_br_acl_mtu = bt_dev.br.mtu;
+    diagnostics->hci_free_packets = last_hci_free_packets;
+    diagnostics->hci_max_free_packets = hci_max_free_packets;
+    diagnostics->hci_min_free_packets =
+        hci_min_free_packets == UINT8_MAX ? last_hci_free_packets :
+                                            hci_min_free_packets;
+    diagnostics->connection_tx_queue_depth =
+        last_connection_tx_queue_depth;
+    diagnostics->max_connection_tx_queue_depth =
+        max_connection_tx_queue_depth;
+    diagnostics->completion_sample_slots_busy = busy_slots;
+    diagnostics->audio_send_attempts = audio_send_attempts;
+    diagnostics->audio_send_accepted = audio_send_accepted;
+    diagnostics->audio_send_immediate_failures =
+        audio_send_immediate_failures;
+    diagnostics->audio_send_enobufs = audio_send_enobufs;
+    diagnostics->max_audio_submit_interval_us =
+        max_audio_submit_interval_us;
+    diagnostics->hci_zero_slot_observations =
+        hci_zero_slot_observations;
+    diagnostics->completion_samples_submitted =
+        completion_samples_submitted;
+    diagnostics->completion_samples_completed =
+        completion_samples_completed;
+    diagnostics->last_completion_latency_us =
+        last_completion_latency_us;
+    diagnostics->max_completion_latency_us =
+        max_completion_latency_us;
+    diagnostics->average_completion_latency_us =
+        average_completion_latency_us;
 }
 
 bool ds5_l2cap_event_try_receive(ds5_l2cap_event_t *event)

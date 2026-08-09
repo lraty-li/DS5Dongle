@@ -1,6 +1,7 @@
 #ifndef DS5_USB_AUDIO_H
 #define DS5_USB_AUDIO_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -21,6 +22,30 @@ extern "C" {
 #define DS5_USB_AUDIO_MICROPHONE_PACKET_BYTES 192U
 /* AudioControl plus the two AudioStreaming interface descriptor blocks. */
 #define DS5_USB_AUDIO_CONFIG_DESCRIPTOR_SIZE 186U
+
+typedef struct {
+    bool speaker_stream_open;
+    bool microphone_stream_open;
+    bool codec_ready;
+    uint32_t generation;
+    uint32_t received_packets;
+    uint32_t invalid_packets;
+    uint32_t dropped_packets;
+    uint32_t arm_failures;
+    uint32_t usb_interval_gap_count;
+    uint32_t max_usb_interval_us;
+    uint32_t published_haptics_blocks;
+    uint32_t dropped_haptics_blocks;
+    uint32_t dropped_speaker_input_frames;
+    uint32_t published_speaker_frames;
+    uint32_t dropped_speaker_opus_frames;
+    uint32_t speaker_encode_count;
+    uint32_t speaker_encode_overruns;
+    uint32_t average_speaker_encode_us;
+    uint32_t max_speaker_encode_us;
+    uint16_t audio_task_stack_high_water_words;
+    uint16_t codec_task_stack_high_water_words;
+} ds5_usb_audio_diagnostics_t;
 
 int ds5_usb_audio_init(uint8_t busid);
 void ds5_usb_audio_deinit(void);
@@ -45,6 +70,7 @@ void ds5_usb_audio_on_out_complete(uint8_t busid, uint8_t endpoint,
                                    uint32_t transferred_bytes);
 void ds5_usb_audio_on_in_complete(uint8_t busid, uint8_t endpoint,
                                   uint32_t transferred_bytes);
+void ds5_usb_audio_get_diagnostics(ds5_usb_audio_diagnostics_t *diagnostics);
 
 #ifdef __cplusplus
 }

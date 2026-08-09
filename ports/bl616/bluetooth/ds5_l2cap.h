@@ -9,6 +9,27 @@
 extern "C" {
 #endif
 
+typedef struct {
+    uint16_t hci_br_acl_mtu;
+    uint8_t hci_free_packets;
+    uint8_t hci_max_free_packets;
+    uint8_t hci_min_free_packets;
+    uint8_t connection_tx_queue_depth;
+    uint8_t max_connection_tx_queue_depth;
+    uint8_t completion_sample_slots_busy;
+    uint32_t audio_send_attempts;
+    uint32_t audio_send_accepted;
+    uint32_t audio_send_immediate_failures;
+    uint32_t audio_send_enobufs;
+    uint32_t max_audio_submit_interval_us;
+    uint32_t hci_zero_slot_observations;
+    uint32_t completion_samples_submitted;
+    uint32_t completion_samples_completed;
+    uint32_t last_completion_latency_us;
+    uint32_t max_completion_latency_us;
+    uint32_t average_completion_latency_us;
+} ds5_l2cap_diagnostics_t;
+
 #define DS5_HID_CONTROL_PSM          0x0011U
 #define DS5_HID_INTERRUPT_PSM        0x0013U
 #define DS5_L2CAP_MTU                672U
@@ -56,6 +77,7 @@ int ds5_l2cap_send(ds5_l2cap_channel_t channel, const uint8_t *data,
 bool ds5_l2cap_event_try_receive(ds5_l2cap_event_t *event);
 bool ds5_l2cap_event_receive(ds5_l2cap_event_t *event);
 uint32_t ds5_l2cap_dropped_event_count(void);
+void ds5_l2cap_get_diagnostics(ds5_l2cap_diagnostics_t *diagnostics);
 
 #ifdef __cplusplus
 }
