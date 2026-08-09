@@ -1,4 +1,5 @@
 from pathlib import Path
+import random
 import re
 import unittest
 
@@ -15,6 +16,10 @@ BT_SOURCE = BL616_DIR / "bluetooth" / "ds5_bt.c"
 L2CAP_HEADER = BL616_DIR / "bluetooth" / "ds5_l2cap.h"
 CMAKE_PATH = BL616_DIR / "CMakeLists.txt"
 DEFCONFIG_PATH = BL616_DIR / "defconfig"
+SDK_OPUS_ARCHIVE = (
+    BL616_DIR.parents[1] / "third_party" / "bouffalo_sdk" / "components" /
+    "multimedia" / "opus" / "libopus.a"
+)
 
 
 def numeric_macros(path):
@@ -83,7 +88,8 @@ class Ds5UsbAudioTests(unittest.TestCase):
         ingress_task = source[ingress_start:codec_start]
 
         self.assertIn("DS5_USB_AUDIO_QUEUE_LENGTH          4U", source)
-        self.assertIn("DS5_USB_SPEAKER_QUEUE_LENGTH        1U", source)
+        self.assertIn("DS5_USB_SPEAKER_QUEUE_LENGTH        2U", source)
+        self.assertIn("DS5_USB_AUDIO_ENCODE_BUDGET_US      10667U", source)
         self.assertIn("DS5_USB_AUDIO_HAPTICS_DECIMATION    16U", source)
         self.assertIn("DS5_USB_AUDIO_SPEAKER_INPUT_STEP    16U", source)
         self.assertIn("DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP   15U", source)
@@ -92,6 +98,8 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("xQueueReceiveFromISR(audio_queue", source)
         self.assertIn("DS5_USB_AUDIO_TASK_PRIORITY", source)
         self.assertIn("DS5_USB_CODEC_TASK_PRIORITY", source)
+        self.assertIn("total_speaker_encode_us += elapsed_us", source)
+        self.assertNotIn("current_average", source)
         self.assertNotIn("opus_encode", ingress_task)
         self.assertNotIn("opus_decode", ingress_task)
 
@@ -178,22 +186,25 @@ class Ds5UsbAudioTests(unittest.TestCase):
         )
         self.assertRegex(source, r"#define\s+DS5_L2CAP_MTU\s+672U")
 
-    def test_build_uses_repository_opus_fixed_point_backend(self):
+    def test_build_uses_sdk_e907_opus_fixed_point_backend(self):
         cmake = CMAKE_PATH.read_text(encoding="utf-8")
         defconfig = DEFCONFIG_PATH.read_text(encoding="utf-8")
 
         self.assertIn("CONFIG_CHERRYUSB_DEVICE_AUDIO =y", defconfig)
         self.assertIn("CONFIG_BT_L2CAP_TX_MTU       =672", defconfig)
-        self.assertNotIn("CONFIG_MULTIMEDIA            =y", defconfig)
-        self.assertNotIn("CONFIG_OPUS                  =y", defconfig)
+        self.assertIn("CONFIG_MULTIMEDIA            =y", defconfig)
+        self.assertIn("CONFIG_OPUS                  =y", defconfig)
+        self.assertIn("CONFIG_MEMSET_OPTSPEED       =y", defconfig)
         self.assertNotIn("../../lib/WDL/WDL/resample.cpp", cmake)
-        self.assertIn("OpusFunctions.cmake", cmake)
-        self.assertIn("SILK_SOURCES_FIXED", cmake)
-        self.assertIn("${DS5_OPUS_SOURCES}", cmake)
-        self.assertIn("FIXED_POINT;DISABLE_FLOAT_API", cmake)
+        self.assertIn("DS5_SDK_OPUS_ROOT", cmake)
+        self.assertIn("libopus.a", cmake)
+        self.assertNotIn("OpusFunctions.cmake", cmake)
+        self.assertNotIn("DS5_OPUS_SOURCES", cmake)
         self.assertNotIn("DS5_OPUS_FLOAT_SOURCES", cmake)
         self.assertNotIn("DS5_OPUS_SILK_FLOAT_SOURCES", cmake)
         self.assertIn("usb/ds5_usb_audio_adapter.c", cmake)
+        self.assertTrue(SDK_OPUS_ARCHIVE.is_file())
+        self.assertIn(b"libopus 1.3-fixed", SDK_OPUS_ARCHIVE.read_bytes())
 
     def test_celt_encoder_hot_path_is_linked_into_on_chip_ram(self):
         cmake = CMAKE_PATH.read_text(encoding="utf-8")
@@ -201,15 +212,89 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("DS5_OPUS_TCM_OBJECTS", cmake)
         self.assertIn("ds5_usb_audio.cpp.obj", cmake)
         self.assertIn("opus_encoder.c.obj", cmake)
+        self.assertIn("opus_decoder.c.obj", cmake)
+        self.assertIn("celt_decoder.c.obj", cmake)
         self.assertIn("celt_encoder.c.obj", cmake)
+        self.assertIn("entdec.c.obj", cmake)
         self.assertIn("bands.c.obj", cmake)
         self.assertIn("modes.c.obj", cmake)
+        self.assertIn("DS5_RUNTIME_TCM_OBJECTS", cmake)
+        self.assertIn("lib_vikmemcpy.c.obj", cmake)
+        self.assertIn("lib_memset.c.obj", cmake)
         self.assertIn("*libapp.a:${DS5_APP_TCM_OBJECT}(.text*)", cmake)
-        self.assertIn("*libapp.a:${DS5_OPUS_TCM_OBJECT}(.text*)", cmake)
-        self.assertIn("*libapp.a:${DS5_OPUS_TCM_OBJECT}(.rodata*)", cmake)
+        self.assertIn("*libopus.a:${DS5_OPUS_TCM_OBJECT}(.text*)", cmake)
+        self.assertIn(
+            "*liblibc.a:${DS5_RUNTIME_TCM_OBJECT}(.text*)", cmake
+        )
+        self.assertIn("*libopus.a:${DS5_OPUS_TCM_OBJECT}(.rodata*)", cmake)
         self.assertIn(
             "sdk_set_linker_script_macro(${DS5_LINKER_SCRIPT})", cmake
         )
+
+    def test_opus_keeps_measured_e907_optimization_level(self):
+        cmake = CMAKE_PATH.read_text(encoding="utf-8")
+        defconfig = DEFCONFIG_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("CONFIG_GCC_OPTIMISE_LEVEL    =-O2", defconfig)
+        self.assertNotIn("opus/ds5_opus_e907_dsp.h", cmake)
+        self.assertNotIn("-O3", cmake)
+        self.assertNotIn("sdk_add_compile_options(-O3", cmake)
+
+    def test_resampler_advances_exact_16_over_15_phase_without_divide(self):
+        source = AUDIO_SOURCE.read_text(encoding="utf-8")
+        input_frame = 0
+        fraction = 0
+        positions = []
+
+        for _ in range(480):
+            positions.append((input_frame, fraction))
+            input_frame += 1
+            fraction += 1
+            if fraction == 15:
+                fraction = 0
+                input_frame += 1
+
+        expected = [(frame * 16 // 15, frame * 16 % 15)
+                    for frame in range(480)]
+        self.assertEqual(expected, positions)
+        self.assertEqual(positions[-1], (510, 14))
+        self.assertIn("Advance 16/15 without a divide/modulo pair", source)
+        self.assertNotIn("position / DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP", source)
+
+    def test_packed_resampler_uses_exact_limited_range_divide(self):
+        source = AUDIO_SOURCE.read_text(encoding="utf-8")
+
+        for magnitude in range(491528):
+            self.assertEqual(
+                magnitude // 15,
+                (magnitude * 0x88889) >> 23,
+                magnitude,
+            )
+
+        rng = random.Random(0x616)
+        for _ in range(4096):
+            current = [rng.randrange(-32768, 32768) for _ in range(2)]
+            following = [rng.randrange(-32768, 32768) for _ in range(2)]
+            fraction = rng.randrange(15)
+            for channel in range(2):
+                mixed = (current[channel] * (15 - fraction) +
+                         following[channel] * fraction)
+                expected = ((abs(mixed) + 7) // 15)
+                if mixed < 0:
+                    expected = -expected
+                sign = (mixed & 0xFFFFFFFF) >> 31
+                sign_mask = (-sign) & 0xFFFFFFFF
+                magnitude = ((((mixed & 0xFFFFFFFF) ^ sign_mask) -
+                              sign_mask) & 0xFFFFFFFF) + 7
+                quotient = (magnitude * 0x88889) >> 23
+                actual = ((quotient ^ sign_mask) + sign) & 0xFFFFFFFF
+                if actual & 0x80000000:
+                    actual -= 0x100000000
+                self.assertEqual(expected, actual)
+
+        self.assertIn("__rv__smul16", source)
+        self.assertIn("DS5_USB_AUDIO_DIV15_MULTIPLIER", source)
+        self.assertNotRegex(source, r"\([^\n]+\)\s*/\s*denominator")
 
     def test_speaker_path_stays_int16_into_fixed_point_opus(self):
         source = AUDIO_SOURCE.read_text(encoding="utf-8")
@@ -219,6 +304,15 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("int16_t *speaker_data", source)
         self.assertIn("encoded_length = opus_encode(", source)
         self.assertNotIn("opus_encode_float(", source)
+
+    def test_speaker_opus_packet_is_padded_and_validated(self):
+        source = AUDIO_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("opus_packet_pad(", source)
+        self.assertIn("opus_packet_get_nb_frames(", source)
+        self.assertIn("opus_packet_get_nb_samples(", source)
+        self.assertIn("opus_packet_get_nb_channels(", source)
+        self.assertNotIn("memset(&opus_frame[encoded_length]", source)
 
 
 if __name__ == "__main__":

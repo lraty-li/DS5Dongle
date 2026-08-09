@@ -10,13 +10,20 @@ CONFIG_SCANF_FLOAT_EX       =y
 
 CONFIG_BFLB_LOG              =n
 
-# SDK's make entry defaults to -Os (size); Opus float encoding needs speed.
-# -O2 matches the SDK cmake default and the working master (Pico) build.
+# Keep the SDK, Bluetooth stack and Opus fixed-point codec at the validated
+# -O2 setting.  E907 measurements showed that -O3 regresses this codec's
+# content-dependent real-time latency despite producing a larger binary.
 CONFIG_GCC_OPTIMISE_LEVEL    =-O2
+
+# Opus clears several working buffers per frame.  Use aligned word stores in
+# the SDK libc implementation instead of its default byte-at-a-time loop.
+CONFIG_MEMSET_OPTSPEED       =y
 
 CONFIG_FREERTOS              =y
 CONFIG_BLUETOOTH             =y
 CONFIG_RF                    =y
+CONFIG_MULTIMEDIA            =y
+CONFIG_OPUS                  =y
 
 CONFIG_CHERRYUSB             =y
 CONFIG_CHERRYUSB_OSAL        =freertos

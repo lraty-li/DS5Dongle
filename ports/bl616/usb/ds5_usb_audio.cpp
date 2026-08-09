@@ -12,6 +12,7 @@
 #include "task.h"
 
 #include "opus.h"
+#include "riscv-dsp.h"
 #include "usbd_core.h"
 
 #include "ds5_audio_mailbox.h"
@@ -20,7 +21,7 @@
 #include "ds5_protocol.h"
 
 #define DS5_USB_AUDIO_QUEUE_LENGTH          4U
-#define DS5_USB_SPEAKER_QUEUE_LENGTH        1U
+#define DS5_USB_SPEAKER_QUEUE_LENGTH        2U
 /*
  * Keep USB ingestion and haptics resampling in a short, high-priority task.
  * Opus encoding used to run in this same task.  One encode can occupy most of
@@ -39,17 +40,21 @@
 /*
  * Below the Bluetooth workers (configMAX_PRIORITIES - 5): when encoding is
  * momentarily slower than real time, USB ingestion and BT keep their latency.
- * The raw-speaker queue drops the oldest complete frame (latest wins).
+ * Two complete raw frames absorb a measured single-frame Opus latency spike;
+ * sustained overload still drops the oldest frame (latest wins) instead of
+ * delaying haptics and USB ingestion without bound.
  */
 #define DS5_USB_CODEC_TASK_PRIORITY         (configMAX_PRIORITIES - 6U)
 #define DS5_USB_AUDIO_LOG_INTERVAL          4096U
-#define DS5_USB_AUDIO_ENCODE_BUDGET_US      11000U
+#define DS5_USB_AUDIO_ENCODE_BUDGET_US      10667U
 #define DS5_USB_AUDIO_PACKET_GAP_LIMIT_US    1500U
 #define DS5_USB_AUDIO_HAPTICS_DECIMATION    16U
 #define DS5_USB_AUDIO_SPEAKER_INPUT_FRAMES  512U
 #define DS5_USB_AUDIO_SPEAKER_OUTPUT_FRAMES 480U
 #define DS5_USB_AUDIO_SPEAKER_INPUT_STEP    16U
 #define DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP   15U
+#define DS5_USB_AUDIO_DIV15_MULTIPLIER       UINT64_C(0x88889)
+#define DS5_USB_AUDIO_DIV15_SHIFT            23U
 #define DS5_USB_AUDIO_MICROPHONE_PACKET_FRAMES 48U
 
 /*
@@ -123,7 +128,7 @@ static volatile uint32_t published_speaker_frames;
 static volatile uint32_t dropped_speaker_input_frames;
 static volatile uint32_t speaker_encode_overruns;
 static volatile uint32_t speaker_encode_count;
-static volatile uint32_t average_speaker_encode_us;
+static volatile uint64_t total_speaker_encode_us;
 static volatile uint32_t max_speaker_encode_us;
 static volatile uint32_t usb_interval_gap_count;
 static volatile uint32_t max_usb_interval_us;
@@ -172,6 +177,26 @@ static int8_t ds5_usb_audio_s16_to_s8(int16_t sample)
     }
 
     return (int8_t)value;
+}
+
+static inline int16_t ds5_usb_audio_divide_round_15(int32_t value)
+{
+    /*
+     * Interpolation weights sum to 15, so abs(value) is at most 491520.
+     * For magnitudes through 491527 (including rounding),
+     * floor(x / 15) == (x * 0x88889) >> 23.  E907 emits MULSR64 + WEXTI
+     * instead of the comparatively long-latency DIV instruction.
+     */
+    uint32_t sign = (uint32_t)value >> 31;
+    uint32_t sign_mask = 0U - sign;
+    uint32_t magnitude =
+        (((uint32_t)value ^ sign_mask) - sign_mask) + 7U;
+    uint32_t quotient = (uint32_t)(
+        ((uint64_t)magnitude * DS5_USB_AUDIO_DIV15_MULTIPLIER) >>
+        DS5_USB_AUDIO_DIV15_SHIFT);
+
+    /* Restore the sign without an unpredictable branch on PCM polarity. */
+    return (int16_t)((quotient ^ sign_mask) + sign);
 }
 
 static bool ds5_usb_audio_queue_packet(uint32_t length)
@@ -375,6 +400,8 @@ static void ds5_usb_audio_encode_speaker(
 {
     uint8_t opus_frame[DS5_AUDIO_SPEAKER_OPUS_SIZE];
     int encoded_length;
+    size_t input_frame = 0U;
+    size_t fraction = 0U;
     size_t output_frame;
 
     if ((encoder == NULL) || (speaker_frame == NULL)) {
@@ -390,36 +417,51 @@ static void ds5_usb_audio_encode_speaker(
      * this feeds the SDK's fixed-point encoder directly without a float round
      * trip. Every output position remains inside this complete 512-sample frame.
      */
+    static_assert(DS5_AUDIO_SPEAKER_CHANNELS == 2U,
+                  "packed E907 interpolation requires stereo PCM");
+    static_assert(DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP == 15U,
+                  "fast rounded division is specialized for denominator 15");
+
     for (output_frame = 0U;
          output_frame < DS5_USB_AUDIO_SPEAKER_OUTPUT_FRAMES;
          ++output_frame) {
-        const int32_t denominator =
-            (int32_t)DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP;
-        const int32_t rounding = denominator / 2;
-        size_t position =
-            output_frame * DS5_USB_AUDIO_SPEAKER_INPUT_STEP;
-        size_t input_frame =
-            position / DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP;
-        size_t fraction =
-            position % DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP;
-        size_t channel;
+        typedef uint32_t ds5_alias_u32 __attribute__((__may_alias__));
+        size_t input_offset =
+            input_frame * DS5_AUDIO_SPEAKER_CHANNELS;
+        size_t output_offset =
+            output_frame * DS5_AUDIO_SPEAKER_CHANNELS;
+        uint32_t current = *(const ds5_alias_u32 *)(const void *)
+            &speaker_frame->data[input_offset];
+        uint32_t next = *(const ds5_alias_u32 *)(const void *)
+            &speaker_frame->data[input_offset + DS5_AUDIO_SPEAKER_CHANNELS];
+        uint32_t fraction_u32 = (uint32_t)fraction;
+        uint32_t current_weight =
+            DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP - fraction_u32;
+        uint64_t current_products;
+        uint64_t next_products;
+        int32_t mixed_left;
+        int32_t mixed_right;
 
-        for (channel = 0U; channel < DS5_AUDIO_SPEAKER_CHANNELS;
-             ++channel) {
-            int32_t current = speaker_frame->data[
-                input_frame * DS5_AUDIO_SPEAKER_CHANNELS + channel];
-            int32_t next = speaker_frame->data[
-                (input_frame + 1U) * DS5_AUDIO_SPEAKER_CHANNELS + channel];
-            int32_t fraction_i32 = (int32_t)fraction;
-            int32_t mixed =
-                current * (denominator - fraction_i32) +
-                next * fraction_i32;
+        fraction_u32 |= fraction_u32 << 16;
+        current_weight |= current_weight << 16;
+        current_products = __rv__smul16(current, current_weight);
+        next_products = __rv__smul16(next, fraction_u32);
+        mixed_left = (int32_t)(uint32_t)current_products +
+                     (int32_t)(uint32_t)next_products;
+        mixed_right = (int32_t)(uint32_t)(current_products >> 32) +
+                      (int32_t)(uint32_t)(next_products >> 32);
 
-            speaker_opus_input[
-                output_frame * DS5_AUDIO_SPEAKER_CHANNELS + channel] =
-                (int16_t)(mixed >= 0 ?
-                    (mixed + rounding) / denominator :
-                    (mixed - rounding) / denominator);
+        speaker_opus_input[output_offset] =
+            ds5_usb_audio_divide_round_15(mixed_left);
+        speaker_opus_input[output_offset + 1U] =
+            ds5_usb_audio_divide_round_15(mixed_right);
+
+        /* Advance 16/15 without a divide/modulo pair per output sample. */
+        ++input_frame;
+        ++fraction;
+        if (fraction == DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP) {
+            fraction = 0U;
+            ++input_frame;
         }
     }
 
@@ -432,8 +474,31 @@ static void ds5_usb_audio_encode_speaker(
     }
 
     if ((size_t)encoded_length < sizeof(opus_frame)) {
-        memset(&opus_frame[encoded_length], 0,
-               sizeof(opus_frame) - (size_t)encoded_length);
+        int pad_result = opus_packet_pad(
+            opus_frame, encoded_length, sizeof(opus_frame));
+
+        if (pad_result != OPUS_OK) {
+            ++invalid_audio_packets;
+            return;
+        }
+        encoded_length = sizeof(opus_frame);
+    }
+
+    /*
+     * The DualSense report has a fixed 200-byte slot for each Opus packet.
+     * Reject a packet before Bluetooth submission unless its standard Opus
+     * framing still describes exactly one 10 ms stereo frame after padding.
+     */
+    if (((size_t)encoded_length != sizeof(opus_frame)) ||
+        (opus_packet_get_nb_frames(opus_frame,
+                                   sizeof(opus_frame)) != 1) ||
+        (opus_packet_get_nb_samples(opus_frame, sizeof(opus_frame),
+                                    DS5_AUDIO_SAMPLE_RATE) !=
+         (int)DS5_USB_AUDIO_SPEAKER_OUTPUT_FRAMES) ||
+        (opus_packet_get_nb_channels(opus_frame) !=
+         (int)DS5_AUDIO_SPEAKER_CHANNELS)) {
+        ++invalid_audio_packets;
+        return;
     }
 
     if (!speaker_stream_open ||
@@ -670,7 +735,6 @@ static void ds5_usb_codec_task(void *parameter)
                 uint64_t elapsed_us_64;
                 uint32_t elapsed_us;
                 uint32_t next_count;
-                uint32_t current_average;
 
                 encode_start_us = bflb_mtimer_get_time_us();
                 ds5_usb_audio_encode_speaker(
@@ -680,16 +744,7 @@ static void ds5_usb_codec_task(void *parameter)
                 elapsed_us = elapsed_us_64 > UINT32_MAX ? UINT32_MAX :
                                                                (uint32_t)elapsed_us_64;
                 next_count = speaker_encode_count + 1U;
-                current_average = average_speaker_encode_us;
-                if (next_count == 1U) {
-                    average_speaker_encode_us = elapsed_us;
-                } else if (elapsed_us >= current_average) {
-                    average_speaker_encode_us = current_average +
-                        ((elapsed_us - current_average) / next_count);
-                } else {
-                    average_speaker_encode_us = current_average -
-                        ((current_average - elapsed_us) / next_count);
-                }
+                total_speaker_encode_us += elapsed_us;
                 speaker_encode_count = next_count;
                 if ((next_count & 0x3fU) == 1U) {
                     codec_task_stack_high_water_words =
@@ -909,7 +964,8 @@ extern "C" void ds5_usb_audio_get_diagnostics(
         ds5_audio_mailbox_dropped_speaker_frames();
     diagnostics->speaker_encode_count = speaker_encode_count;
     diagnostics->speaker_encode_overruns = speaker_encode_overruns;
-    diagnostics->average_speaker_encode_us = average_speaker_encode_us;
+    diagnostics->average_speaker_encode_us = speaker_encode_count != 0U ?
+        (uint32_t)(total_speaker_encode_us / speaker_encode_count) : 0U;
     diagnostics->max_speaker_encode_us = max_speaker_encode_us;
     diagnostics->audio_task_stack_high_water_words =
         audio_task_stack_high_water_words;
@@ -935,7 +991,7 @@ int ds5_usb_audio_init(uint8_t busid)
     dropped_speaker_input_frames = 0U;
     speaker_encode_overruns = 0U;
     speaker_encode_count = 0U;
-    average_speaker_encode_us = 0U;
+    total_speaker_encode_us = 0U;
     max_speaker_encode_us = 0U;
     usb_interval_gap_count = 0U;
     max_usb_interval_us = 0U;
