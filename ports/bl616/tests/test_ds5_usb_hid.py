@@ -73,6 +73,16 @@ class Ds5UsbHidTests(unittest.TestCase):
         )
         self.assertIn("memcpy(&hid_transmit_report[1], payload", source)
 
+    def test_hid_endpoints_poll_every_usb_frame(self):
+        constants = numeric_macros(HID_HEADER)
+        source = USB_SOURCE.read_text(encoding="utf-8")
+
+        # BL616 is forced to USB full speed, where bInterval is measured in
+        # 1 ms frames.  Polling every frame avoids adding another 0-3 ms
+        # wait after a fresh Bluetooth input report becomes available.
+        self.assertEqual(constants["DS5_USB_HID_POLL_INTERVAL"], 1)
+        self.assertEqual(source.count("DS5_USB_HID_POLL_INTERVAL"), 2)
+
     def test_hid_out_reads_exact_wire_report_size(self):
         source = HID_SOURCE.read_text(encoding="utf-8")
 
