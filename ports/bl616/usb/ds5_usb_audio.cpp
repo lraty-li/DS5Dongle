@@ -45,7 +45,6 @@
  * delaying haptics and USB ingestion without bound.
  */
 #define DS5_USB_CODEC_TASK_PRIORITY         (configMAX_PRIORITIES - 6U)
-#define DS5_USB_AUDIO_LOG_INTERVAL          4096U
 #define DS5_USB_AUDIO_ENCODE_BUDGET_US      10667U
 #define DS5_USB_AUDIO_PACKET_GAP_LIMIT_US    1500U
 #define DS5_USB_AUDIO_HAPTICS_DECIMATION    16U
@@ -133,8 +132,6 @@ static volatile uint32_t max_speaker_encode_us;
 static volatile uint32_t usb_interval_gap_count;
 static volatile uint32_t max_usb_interval_us;
 static volatile uint32_t decoded_microphone_frames;
-static volatile uint16_t audio_task_stack_high_water_words;
-static volatile uint16_t codec_task_stack_high_water_words;
 static volatile bool codecs_ready;
 static volatile bool speaker_muted;
 static volatile bool microphone_muted;
@@ -143,9 +140,15 @@ static volatile int microphone_volume_db;
 static uint8_t audio_bus_id;
 static uint64_t last_audio_completion_us;
 
-static uint16_t ds5_usb_audio_current_stack_high_water_words(void)
+static uint16_t ds5_usb_audio_stack_high_water_words(TaskHandle_t task)
 {
-    UBaseType_t words = uxTaskGetStackHighWaterMark(NULL);
+    UBaseType_t words;
+
+    if (task == NULL) {
+        return 0U;
+    }
+
+    words = uxTaskGetStackHighWaterMark(task);
 
     return words > UINT16_MAX ? UINT16_MAX : (uint16_t)words;
 }
@@ -640,7 +643,6 @@ static void ds5_usb_audio_task(void *parameter)
     size_t haptics_decimation_phase = 0U;
     size_t speaker_position = 0U;
     uint32_t active_generation = 0U;
-    uint32_t observed_packets = 0U;
 
     (void)parameter;
 
@@ -649,11 +651,6 @@ static void ds5_usb_audio_task(void *parameter)
             continue;
         }
 
-        ++observed_packets;
-        if ((observed_packets & 0xffU) == 1U) {
-            audio_task_stack_high_water_words =
-                ds5_usb_audio_current_stack_high_water_words();
-        }
         if (!speaker_stream_open ||
             (packet.generation != audio_generation)) {
             continue;
@@ -671,24 +668,6 @@ static void ds5_usb_audio_task(void *parameter)
             &haptics_decimation_phase, speaker_staging_frame.data,
             &speaker_position);
 
-        if ((observed_packets == 1U) ||
-            ((observed_packets % DS5_USB_AUDIO_LOG_INTERVAL) == 0U)) {
-            ds5_log_printf(
-                "DS5 USB Audio: packets %lu, invalid %lu, USB dropped %lu, "
-                "raw speaker dropped %lu, haptics %lu, speaker %lu, "
-                "Opus dropped %lu, encode overruns %lu (max %lu us), "
-                "mic %lu\r\n",
-                (unsigned long)received_audio_packets,
-                (unsigned long)invalid_audio_packets,
-                (unsigned long)dropped_audio_packets,
-                (unsigned long)dropped_speaker_input_frames,
-                (unsigned long)published_haptics_blocks,
-                (unsigned long)published_speaker_frames,
-                (unsigned long)ds5_audio_mailbox_dropped_speaker_frames(),
-                (unsigned long)speaker_encode_overruns,
-                (unsigned long)max_speaker_encode_us,
-                (unsigned long)decoded_microphone_frames);
-        }
     }
 }
 
@@ -734,7 +713,6 @@ static void ds5_usb_codec_task(void *parameter)
                 uint64_t encode_start_us;
                 uint64_t elapsed_us_64;
                 uint32_t elapsed_us;
-                uint32_t next_count;
 
                 encode_start_us = bflb_mtimer_get_time_us();
                 ds5_usb_audio_encode_speaker(
@@ -743,13 +721,8 @@ static void ds5_usb_codec_task(void *parameter)
                     bflb_mtimer_get_time_us() - encode_start_us;
                 elapsed_us = elapsed_us_64 > UINT32_MAX ? UINT32_MAX :
                                                                (uint32_t)elapsed_us_64;
-                next_count = speaker_encode_count + 1U;
                 total_speaker_encode_us += elapsed_us;
-                speaker_encode_count = next_count;
-                if ((next_count & 0x3fU) == 1U) {
-                    codec_task_stack_high_water_words =
-                        ds5_usb_audio_current_stack_high_water_words();
-                }
+                ++speaker_encode_count;
                 if (elapsed_us > max_speaker_encode_us) {
                     max_speaker_encode_us = elapsed_us;
                 }
@@ -968,9 +941,9 @@ extern "C" void ds5_usb_audio_get_diagnostics(
         (uint32_t)(total_speaker_encode_us / speaker_encode_count) : 0U;
     diagnostics->max_speaker_encode_us = max_speaker_encode_us;
     diagnostics->audio_task_stack_high_water_words =
-        audio_task_stack_high_water_words;
+        ds5_usb_audio_stack_high_water_words(audio_task);
     diagnostics->codec_task_stack_high_water_words =
-        codec_task_stack_high_water_words;
+        ds5_usb_audio_stack_high_water_words(codec_task);
 }
 
 int ds5_usb_audio_init(uint8_t busid)
@@ -996,8 +969,6 @@ int ds5_usb_audio_init(uint8_t busid)
     usb_interval_gap_count = 0U;
     max_usb_interval_us = 0U;
     decoded_microphone_frames = 0U;
-    audio_task_stack_high_water_words = 0U;
-    codec_task_stack_high_water_words = 0U;
     codecs_ready = false;
     speaker_muted = false;
     microphone_muted = false;

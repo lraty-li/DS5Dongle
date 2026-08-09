@@ -33,9 +33,6 @@
 #define DS5_BT_CANDIDATE_NAME_SIZE    64U
 #define DS5_BT_WORKER_STACK_DEPTH     (configMINIMAL_STACK_SIZE * 4U)
 #define DS5_BT_TX_WORKER_STACK_DEPTH  (configMINIMAL_STACK_SIZE * 6U)
-#define DS5_BT_INPUT_LOG_INTERVAL     1024U
-#define DS5_BT_OUTPUT_LOG_INTERVAL    256U
-#define DS5_BT_HAPTICS_LOG_INTERVAL   256U
 #define DS5_BT_OUTPUT_READY_TIMEOUT_MS 5000U
 #define DS5_BT_TX_POLL_MS              1U
 #define DS5_BT_DEFAULT_MIC_SELECT      0U
@@ -89,7 +86,6 @@ static uint32_t failed_haptics_reports;
 static uint32_t discarded_haptics_not_ready;
 static uint32_t received_microphone_packets;
 static uint32_t rejected_microphone_packets;
-static uint32_t transmitted_audio_reports;
 static uint32_t transmitted_microphone_status_reports;
 static uint32_t failed_microphone_status_reports;
 static uint32_t transmitted_feature_set_reports;
@@ -112,12 +108,16 @@ static TaskHandle_t worker_task;
 static StaticTask_t tx_worker_task_storage;
 static StackType_t tx_worker_task_stack[DS5_BT_TX_WORKER_STACK_DEPTH];
 static TaskHandle_t tx_worker_task;
-static volatile uint16_t worker_task_stack_high_water_words;
-static volatile uint16_t tx_worker_task_stack_high_water_words;
 
-static uint16_t ds5_bt_current_stack_high_water_words(void)
+static uint16_t ds5_bt_stack_high_water_words(TaskHandle_t task)
 {
-    UBaseType_t words = uxTaskGetStackHighWaterMark(NULL);
+    UBaseType_t words;
+
+    if (task == NULL) {
+        return 0U;
+    }
+
+    words = uxTaskGetStackHighWaterMark(task);
 
     return words > UINT16_MAX ? UINT16_MAX : (uint16_t)words;
 }
@@ -732,13 +732,6 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
             headset_connected =
                 (latest_usb_input_payload[53U] & 0x01U) != 0U;
 
-            if ((valid_input_reports % DS5_BT_INPUT_LOG_INTERVAL) == 0U) {
-                printf("DS5 BT: input reports valid %lu, invalid %lu, "
-                       "L2CAP events dropped %lu\r\n",
-                       (unsigned long)valid_input_reports,
-                       (unsigned long)invalid_input_reports,
-                       (unsigned long)ds5_l2cap_dropped_event_count());
-            }
         } else {
             ++invalid_input_reports;
             if (invalid_input_reports <= 4U) {
@@ -764,18 +757,12 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
 static void ds5_bt_worker(void *parameter)
 {
     ds5_l2cap_event_t event;
-    uint32_t diagnostic_event_count = 0U;
 
     (void)parameter;
 
     while (1) {
         if (ds5_l2cap_event_receive(&event)) {
             ds5_bt_process_l2cap_event(&event);
-            ++diagnostic_event_count;
-            if ((diagnostic_event_count & 0x3fU) == 1U) {
-                worker_task_stack_high_water_words =
-                    ds5_bt_current_stack_high_water_words();
-            }
         }
     }
 }
@@ -828,11 +815,6 @@ static bool ds5_bt_forward_usb_output(
     ++transmitted_output_reports;
     if (transmitted_output_reports == 1U) {
         printf("DS5 BT: first USB output report forwarded\r\n");
-    } else if ((transmitted_output_reports %
-                DS5_BT_OUTPUT_LOG_INTERVAL) == 0U) {
-        printf("DS5 BT: output reports forwarded %lu, failed %lu\r\n",
-               (unsigned long)transmitted_output_reports,
-               (unsigned long)failed_output_reports);
     }
 
     return true;
@@ -914,21 +896,10 @@ static void ds5_bt_forward_audio(
     }
 
     ++transmitted_haptics_reports;
-    if (speaker_opus_data_length != 0U) {
-        ++transmitted_audio_reports;
-    }
     if (transmitted_haptics_reports == 1U) {
         printf("DS5 BT: first native haptics report forwarded "
                "(%lu pre-ready block(s) discarded)\r\n",
                (unsigned long)discarded_haptics_not_ready);
-    } else if ((transmitted_haptics_reports %
-                DS5_BT_HAPTICS_LOG_INTERVAL) == 0U) {
-        printf("DS5 BT: audio reports %lu, haptics reports %lu, failed %lu, "
-               "mailbox dropped %lu\r\n",
-               (unsigned long)transmitted_audio_reports,
-               (unsigned long)transmitted_haptics_reports,
-               (unsigned long)failed_haptics_reports,
-               (unsigned long)ds5_haptics_mailbox_dropped_count());
     }
 
 }
@@ -1020,7 +991,6 @@ static void ds5_bt_tx_worker(void *parameter)
     bool pending_microphone_state = false;
     bool pending_feature_set = false;
     size_t speaker_frame_count = 0U;
-    uint32_t diagnostic_iteration_count = 0U;
 
     (void)parameter;
 
@@ -1028,12 +998,6 @@ static void ds5_bt_tx_worker(void *parameter)
         bool did_work = false;
         uint8_t newer_report[DS5_USB_OUTPUT_REPORT_SIZE];
         bool newest_microphone_state;
-
-        ++diagnostic_iteration_count;
-        if ((diagnostic_iteration_count & 0x3ffU) == 1U) {
-            tx_worker_task_stack_high_water_words =
-                ds5_bt_current_stack_high_water_words();
-        }
 
         if (!pending_feature_set &&
             ds5_feature_set_mailbox_try_receive(&feature_set_request)) {
@@ -1253,9 +1217,6 @@ int ds5_bt_init(void)
 {
     int err;
 
-    worker_task_stack_high_water_words = 0U;
-    tx_worker_task_stack_high_water_words = 0U;
-
     printf("DS5 BT: initializing controller\r\n");
     btble_controller_init(configMAX_PRIORITIES - 1U);
     printf("DS5 BT: controller initialized\r\n");
@@ -1413,7 +1374,7 @@ void ds5_bt_get_diagnostics(ds5_bt_diagnostics_t *diagnostics)
     diagnostics->control_channel_ready = control_channel_ready;
     diagnostics->interrupt_channel_ready = interrupt_channel_ready;
     diagnostics->worker_task_stack_high_water_words =
-        worker_task_stack_high_water_words;
+        ds5_bt_stack_high_water_words(worker_task);
     diagnostics->tx_worker_task_stack_high_water_words =
-        tx_worker_task_stack_high_water_words;
+        ds5_bt_stack_high_water_words(tx_worker_task);
 }

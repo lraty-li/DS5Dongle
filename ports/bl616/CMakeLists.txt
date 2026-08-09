@@ -19,8 +19,10 @@ set(DS5_APP_TCM_OBJECTS
     ds5_usb_audio.cpp.obj
 )
 set(DS5_OPUS_TCM_OBJECTS
+    opus.c.obj
     opus_encoder.c.obj
     opus_decoder.c.obj
+    repacketizer.c.obj
     bands.c.obj
     celt.c.obj
     celt_decoder.c.obj
@@ -41,8 +43,18 @@ set(DS5_OPUS_TCM_OBJECTS
     vq.c.obj
 )
 set(DS5_RUNTIME_TCM_OBJECTS
+    lib_abs.c.obj
+    lib_memmove.c.obj
     lib_vikmemcpy.c.obj
     lib_memset.c.obj
+)
+set(DS5_LIBGCC_TCM_OBJECTS
+    _clzsi2.o
+    extendsfdf2.o
+    floatsidf.o
+    gedf2.o
+    ledf2.o
+    muldf3.o
 )
 
 set(DS5_OPUS_TCM_TEXT_RULES "")
@@ -67,6 +79,13 @@ foreach(DS5_RUNTIME_TCM_OBJECT IN LISTS DS5_RUNTIME_TCM_OBJECTS)
     string(APPEND DS5_OPUS_TCM_RODATA_RULES
            "        *liblibc.a:${DS5_RUNTIME_TCM_OBJECT}(.rodata*)\n"
            "        *liblibc.a:${DS5_RUNTIME_TCM_OBJECT}(.srodata*)\n")
+endforeach()
+foreach(DS5_LIBGCC_TCM_OBJECT IN LISTS DS5_LIBGCC_TCM_OBJECTS)
+    string(APPEND DS5_OPUS_TCM_TEXT_RULES
+           "        *libgcc.a:${DS5_LIBGCC_TCM_OBJECT}(.text*)\n")
+    string(APPEND DS5_OPUS_TCM_RODATA_RULES
+           "        *libgcc.a:${DS5_LIBGCC_TCM_OBJECT}(.rodata*)\n"
+           "        *libgcc.a:${DS5_LIBGCC_TCM_OBJECT}(.srodata*)\n")
 endforeach()
 
 # Derive the application linker script from the SDK's board script so memory

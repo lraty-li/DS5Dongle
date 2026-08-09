@@ -213,6 +213,8 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("ds5_usb_audio.cpp.obj", cmake)
         self.assertIn("opus_encoder.c.obj", cmake)
         self.assertIn("opus_decoder.c.obj", cmake)
+        self.assertIn("opus.c.obj", cmake)
+        self.assertIn("repacketizer.c.obj", cmake)
         self.assertIn("celt_decoder.c.obj", cmake)
         self.assertIn("celt_encoder.c.obj", cmake)
         self.assertIn("entdec.c.obj", cmake)
@@ -221,10 +223,18 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("DS5_RUNTIME_TCM_OBJECTS", cmake)
         self.assertIn("lib_vikmemcpy.c.obj", cmake)
         self.assertIn("lib_memset.c.obj", cmake)
+        self.assertIn("lib_memmove.c.obj", cmake)
+        self.assertIn("lib_abs.c.obj", cmake)
+        self.assertIn("DS5_LIBGCC_TCM_OBJECTS", cmake)
+        self.assertIn("_clzsi2.o", cmake)
+        self.assertIn("muldf3.o", cmake)
         self.assertIn("*libapp.a:${DS5_APP_TCM_OBJECT}(.text*)", cmake)
         self.assertIn("*libopus.a:${DS5_OPUS_TCM_OBJECT}(.text*)", cmake)
         self.assertIn(
             "*liblibc.a:${DS5_RUNTIME_TCM_OBJECT}(.text*)", cmake
+        )
+        self.assertIn(
+            "*libgcc.a:${DS5_LIBGCC_TCM_OBJECT}(.text*)", cmake
         )
         self.assertIn("*libopus.a:${DS5_OPUS_TCM_OBJECT}(.rodata*)", cmake)
         self.assertIn(
@@ -239,6 +249,28 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertNotIn("opus/ds5_opus_e907_dsp.h", cmake)
         self.assertNotIn("-O3", cmake)
         self.assertNotIn("sdk_add_compile_options(-O3", cmake)
+
+    def test_realtime_tasks_do_not_format_periodic_status_logs(self):
+        audio = AUDIO_SOURCE.read_text(encoding="utf-8")
+        bluetooth = BT_SOURCE.read_text(encoding="utf-8")
+
+        self.assertNotIn("DS5_USB_AUDIO_LOG_INTERVAL", audio)
+        self.assertNotIn("observed_packets %", audio)
+        self.assertNotIn("DS5_BT_INPUT_LOG_INTERVAL", bluetooth)
+        self.assertNotIn("DS5_BT_OUTPUT_LOG_INTERVAL", bluetooth)
+        self.assertNotIn("DS5_BT_HAPTICS_LOG_INTERVAL", bluetooth)
+        self.assertNotIn("diagnostic_event_count", bluetooth)
+        self.assertNotIn("diagnostic_iteration_count", bluetooth)
+        self.assertIn(
+            "ds5_usb_audio_stack_high_water_words(audio_task)", audio
+        )
+        self.assertIn(
+            "ds5_usb_audio_stack_high_water_words(codec_task)", audio
+        )
+        self.assertIn("ds5_bt_stack_high_water_words(worker_task)", bluetooth)
+        self.assertIn(
+            "ds5_bt_stack_high_water_words(tx_worker_task)", bluetooth
+        )
 
     def test_resampler_advances_exact_16_over_15_phase_without_divide(self):
         source = AUDIO_SOURCE.read_text(encoding="utf-8")
