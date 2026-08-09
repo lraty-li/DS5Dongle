@@ -88,6 +88,10 @@ static uint32_t received_microphone_packets;
 static uint32_t rejected_microphone_packets;
 static uint32_t transmitted_microphone_status_reports;
 static uint32_t failed_microphone_status_reports;
+static uint32_t received_microphone_button_presses;
+static uint32_t dropped_microphone_button_presses;
+static uint32_t transmitted_microphone_mute_reports;
+static uint32_t failed_microphone_mute_reports;
 static uint32_t transmitted_feature_set_reports;
 static uint32_t failed_feature_set_reports;
 static uint8_t latest_usb_input_payload[DS5_USB_INPUT_PAYLOAD_SIZE];
@@ -96,6 +100,8 @@ static volatile bool initialization_pending;
 static ds5_output_sequence_t output_sequence;
 static uint8_t haptics_packet_counter;
 static bool headset_connected;
+static bool microphone_button_pressed;
+static volatile uint32_t link_generation;
 
 static const struct bt_br_discovery_param discovery_param = {
     .length = DS5_BT_DISCOVERY_LENGTH,
@@ -215,6 +221,8 @@ static void ds5_bt_reset_link_state(void)
     ds5_output_sequence_reset(&output_sequence, 0U);
     haptics_packet_counter = 0U;
     headset_connected = false;
+    microphone_button_pressed = false;
+    ++link_generation;
 }
 
 static void ds5_bt_return_to_candidate(void)
@@ -732,6 +740,32 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
             headset_connected =
                 (latest_usb_input_payload[53U] & 0x01U) != 0U;
 
+            /*
+             * A DualSense reports the microphone button as a momentary HID
+             * input.  The host must toggle both the hardware mute state and
+             * its yellow LED on the rising edge; the controller does not do
+             * that state machine for us while bridged over Bluetooth.
+             */
+            {
+                bool pressed =
+                    (latest_usb_input_payload[
+                         DS5_USB_INPUT_BUTTONS2_OFFSET] &
+                     DS5_USB_INPUT_MIC_BUTTON_MASK) != 0U;
+
+                if (pressed && !microphone_button_pressed) {
+                    if (ds5_output_mailbox_publish_microphone_button_press()) {
+                        ++received_microphone_button_presses;
+                    } else {
+                        ++dropped_microphone_button_presses;
+                        if (dropped_microphone_button_presses <= 4U) {
+                            printf("DS5 BT: microphone button event queue "
+                                   "full\r\n");
+                        }
+                    }
+                }
+                microphone_button_pressed = pressed;
+            }
+
         } else {
             ++invalid_input_reports;
             if (invalid_input_reports <= 4U) {
@@ -817,6 +851,32 @@ static bool ds5_bt_forward_usb_output(
         printf("DS5 BT: first USB output report forwarded\r\n");
     }
 
+    return true;
+}
+
+static bool ds5_bt_send_microphone_mute(
+    bool muted,
+    uint8_t *usb_report,
+    size_t usb_report_capacity,
+    uint8_t *bt_transaction,
+    size_t bt_transaction_capacity)
+{
+    ds5_protocol_result_t protocol_result;
+
+    protocol_result = ds5_build_usb_microphone_mute_report(
+        muted, usb_report, usb_report_capacity);
+    if (protocol_result != DS5_PROTOCOL_OK) {
+        ++failed_microphone_mute_reports;
+        return false;
+    }
+
+    if (!ds5_bt_forward_usb_output(usb_report, bt_transaction,
+                                   bt_transaction_capacity)) {
+        ++failed_microphone_mute_reports;
+        return false;
+    }
+
+    ++transmitted_microphone_mute_reports;
     return true;
 }
 
@@ -989,8 +1049,11 @@ static void ds5_bt_tx_worker(void *parameter)
     bool pending_haptics = false;
     bool microphone_stream_enabled = false;
     bool pending_microphone_state = false;
+    bool controller_microphone_muted = false;
+    bool pending_microphone_mute = false;
     bool pending_feature_set = false;
     size_t speaker_frame_count = 0U;
+    uint32_t observed_link_generation = link_generation;
 
     (void)parameter;
 
@@ -998,6 +1061,14 @@ static void ds5_bt_tx_worker(void *parameter)
         bool did_work = false;
         uint8_t newer_report[DS5_USB_OUTPUT_REPORT_SIZE];
         bool newest_microphone_state;
+
+        if (observed_link_generation != link_generation) {
+            observed_link_generation = link_generation;
+            controller_microphone_muted = false;
+            pending_microphone_mute = false;
+            while (ds5_output_mailbox_try_receive_microphone_button_press()) {
+            }
+        }
 
         if (!pending_feature_set &&
             ds5_feature_set_mailbox_try_receive(&feature_set_request)) {
@@ -1007,9 +1078,29 @@ static void ds5_bt_tx_worker(void *parameter)
 
         while (ds5_output_mailbox_try_receive(newer_report,
                                               sizeof(newer_report))) {
+            if ((newer_report[DS5_USB_OUTPUT_VALID_FLAGS1_OFFSET] &
+                 DS5_USB_OUTPUT_ALLOW_AUDIO_MUTE) != 0U) {
+                controller_microphone_muted =
+                    (newer_report[DS5_USB_OUTPUT_MUTE_CONTROL_OFFSET] &
+                     DS5_USB_OUTPUT_MIC_MUTE) != 0U;
+
+                /* Keep the yellow LED authoritative to the actual mute bit. */
+                newer_report[DS5_USB_OUTPUT_VALID_FLAGS1_OFFSET] |=
+                    DS5_USB_OUTPUT_ALLOW_MUTE_LIGHT;
+                newer_report[DS5_USB_OUTPUT_MUTE_LIGHT_OFFSET] =
+                    controller_microphone_muted ?
+                        DS5_USB_OUTPUT_MUTE_LIGHT_ON : 0U;
+                pending_microphone_mute = false;
+            }
             memcpy(usb_report, newer_report, sizeof(usb_report));
             pending_usb_output = true;
             pending_usb_output_since = xTaskGetTickCount();
+            did_work = true;
+        }
+
+        while (ds5_output_mailbox_try_receive_microphone_button_press()) {
+            controller_microphone_muted = !controller_microphone_muted;
+            pending_microphone_mute = true;
             did_work = true;
         }
 
@@ -1107,6 +1198,18 @@ static void ds5_bt_tx_worker(void *parameter)
                            "controller\r\n");
                 }
                 pending_usb_output = false;
+            }
+        }
+
+        /* A physical press is newer than any host report already queued. */
+        if (!initialization_pending && !pending_usb_output &&
+            pending_microphone_mute && ds5_bt_interrupt_ready()) {
+            if (ds5_bt_send_microphone_mute(
+                    controller_microphone_muted, newer_report,
+                    sizeof(newer_report), bt_transaction,
+                    sizeof(bt_transaction))) {
+                pending_microphone_mute = false;
+                did_work = true;
             }
         }
 

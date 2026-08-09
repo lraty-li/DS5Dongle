@@ -74,6 +74,22 @@ def build_bt_output(usb_report, sequence):
     return transaction, ((sequence & 0x0F) + 1) & 0x0F
 
 
+def build_usb_microphone_mute_report(muted):
+    report = bytearray(CONSTANTS["DS5_USB_OUTPUT_REPORT_SIZE"])
+    report[0] = CONSTANTS["DS5_USB_OUTPUT_REPORT_ID"]
+    report[CONSTANTS["DS5_USB_OUTPUT_VALID_FLAGS1_OFFSET"]] = (
+        CONSTANTS["DS5_USB_OUTPUT_ALLOW_MUTE_LIGHT"]
+        | CONSTANTS["DS5_USB_OUTPUT_ALLOW_AUDIO_MUTE"]
+    )
+    report[CONSTANTS["DS5_USB_OUTPUT_MUTE_LIGHT_OFFSET"]] = (
+        CONSTANTS["DS5_USB_OUTPUT_MUTE_LIGHT_ON"] if muted else 0
+    )
+    report[CONSTANTS["DS5_USB_OUTPUT_MUTE_CONTROL_OFFSET"]] = (
+        CONSTANTS["DS5_USB_OUTPUT_MIC_MUTE"] if muted else 0
+    )
+    return bytes(report)
+
+
 def build_bt_haptics(haptics_data, sequence, packet_counter):
     if len(haptics_data) != CONSTANTS["DS5_HAPTICS_DATA_SIZE"]:
         raise ValueError("unexpected haptics data length")
@@ -187,7 +203,7 @@ def build_bt_initialization(mic_select=0):
     report[3] = CONSTANTS["DS5_BT_INITIALIZATION_MODE"]
     state = CONSTANTS["DS5_BT_INITIALIZATION_STATE_OFFSET"]
     report[state + 0] = 0x80
-    report[state + 1] = 0x04
+    report[state + 1] = 0x07
     report[state + 7] = mic_select
     report[state + 38] = 0x03
     report[state + 41] = 0x02
@@ -313,11 +329,46 @@ class Ds5ProtocolContractTests(unittest.TestCase):
         )
         self.assertEqual(transaction[:5], bytes.fromhex("a23210903f"))
         self.assertEqual(transaction[state + 0], 0x80)
-        self.assertEqual(transaction[state + 1], 0x04)
+        self.assertEqual(transaction[state + 1], 0x07)
         self.assertEqual(transaction[state + 38], 0x03)
         self.assertEqual(transaction[state + 41], 0x02)
         self.assertEqual(transaction[state + 44 : state + 47], bytes.fromhex("ffd700"))
-        self.assertEqual(transaction[-4:], bytes.fromhex("172d9c79"))
+        self.assertEqual(
+            int.from_bytes(transaction[-4:], "little"),
+            crc32_seeded(transaction[1:-4], 0xEADA2D49),
+        )
+
+    def test_microphone_button_report_keeps_mute_and_yellow_led_in_sync(self):
+        muted = build_usb_microphone_mute_report(True)
+        unmuted = build_usb_microphone_mute_report(False)
+
+        self.assertEqual(
+            muted[CONSTANTS["DS5_USB_OUTPUT_VALID_FLAGS1_OFFSET"]], 0x03
+        )
+        self.assertEqual(
+            muted[CONSTANTS["DS5_USB_OUTPUT_MUTE_LIGHT_OFFSET"]], 0x01
+        )
+        self.assertEqual(
+            muted[CONSTANTS["DS5_USB_OUTPUT_MUTE_CONTROL_OFFSET"]], 0x10
+        )
+        self.assertEqual(
+            unmuted[CONSTANTS["DS5_USB_OUTPUT_VALID_FLAGS1_OFFSET"]], 0x03
+        )
+        self.assertEqual(
+            unmuted[CONSTANTS["DS5_USB_OUTPUT_MUTE_LIGHT_OFFSET"]], 0x00
+        )
+        self.assertEqual(
+            unmuted[CONSTANTS["DS5_USB_OUTPUT_MUTE_CONTROL_OFFSET"]], 0x00
+        )
+
+        transaction, _ = build_bt_output(muted, 0)
+        state = (
+            CONSTANTS["DS5_BT_OUTPUT_REPORT_OFFSET"]
+            + CONSTANTS["DS5_BT_OUTPUT_STATE_OFFSET"]
+        )
+        self.assertEqual(transaction[state + 1], 0x03)
+        self.assertEqual(transaction[state + 8], 0x01)
+        self.assertEqual(transaction[state + 9], 0x10)
 
     def test_startup_state_preserves_two_bit_microphone_setting(self):
         transaction = build_bt_initialization(3)

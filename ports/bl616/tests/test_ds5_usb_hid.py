@@ -139,6 +139,17 @@ class Ds5UsbHidTests(unittest.TestCase):
         self.assertNotIn("malloc(", source)
         self.assertNotIn("free(", source)
 
+    def test_microphone_button_uses_a_separate_ordered_event_mailbox(self):
+        source = OUTPUT_MAILBOX_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("DS5_MIC_BUTTON_MAILBOX_LENGTH 4U", source)
+        self.assertIn("xQueueSendFromISR(microphone_button_queue", source)
+        self.assertIn("xQueueSend(microphone_button_queue", source)
+        self.assertIn("xQueueReceive(microphone_button_queue", source)
+        self.assertNotIn(
+            "xQueueOverwrite(microphone_button_queue", source
+        )
+
     def test_feature_set_uses_a_separate_ordered_mailbox(self):
         source = FEATURE_SET_MAILBOX_SOURCE.read_text(encoding="utf-8")
 
@@ -198,6 +209,19 @@ class Ds5UsbHidTests(unittest.TestCase):
         self.assertIn(
             "ds5_input_mailbox_publish", source[valid_start:valid_end]
         )
+
+    def test_bluetooth_toggles_microphone_only_on_button_rising_edge(self):
+        source = BT_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("pressed && !microphone_button_pressed", source)
+        self.assertIn(
+            "ds5_output_mailbox_publish_microphone_button_press()", source
+        )
+        self.assertIn(
+            "controller_microphone_muted = !controller_microphone_muted",
+            source,
+        )
+        self.assertIn("ds5_build_usb_microphone_mute_report", source)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

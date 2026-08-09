@@ -11,6 +11,8 @@ extern "C" {
 
 #define DS5_USB_INPUT_REPORT_ID            0x01U
 #define DS5_USB_INPUT_PAYLOAD_SIZE         63U
+#define DS5_USB_INPUT_BUTTONS2_OFFSET      9U
+#define DS5_USB_INPUT_MIC_BUTTON_MASK      0x04U
 
 #define DS5_BT_INPUT_TRANSACTION_HEADER    0xA1U
 #define DS5_BT_INPUT_REPORT_ID             0x31U
@@ -24,6 +26,15 @@ extern "C" {
 #define DS5_USB_OUTPUT_STATE_SIZE          47U
 #define DS5_SET_STATE_SIZE                 63U
 
+/* SetStateData fields used by the physical microphone-mute button. */
+#define DS5_USB_OUTPUT_VALID_FLAGS1_OFFSET 2U
+#define DS5_USB_OUTPUT_MUTE_LIGHT_OFFSET   9U
+#define DS5_USB_OUTPUT_MUTE_CONTROL_OFFSET 10U
+#define DS5_USB_OUTPUT_ALLOW_MUTE_LIGHT    0x01U
+#define DS5_USB_OUTPUT_ALLOW_AUDIO_MUTE    0x02U
+#define DS5_USB_OUTPUT_MUTE_LIGHT_ON       0x01U
+#define DS5_USB_OUTPUT_MIC_MUTE            0x10U
+
 #define DS5_BT_OUTPUT_TRANSACTION_HEADER   0xA2U
 #define DS5_BT_OUTPUT_TRANSACTION_SIZE     79U
 #define DS5_BT_OUTPUT_REPORT_OFFSET        1U
@@ -35,7 +46,7 @@ extern "C" {
 #define DS5_BT_OUTPUT_STATE_OFFSET         3U
 #define DS5_BT_OUTPUT_CRC_OFFSET           74U
 
-/* Original src/bt.cpp update_state() report, including its BT CRC. */
+/* Startup 0x32 SetStateData report, including its Bluetooth CRC. */
 #define DS5_BT_INITIALIZATION_TRANSACTION_SIZE 143U
 #define DS5_BT_INITIALIZATION_REPORT_SIZE  142U
 #define DS5_BT_INITIALIZATION_REPORT_ID    0x32U
@@ -124,9 +135,14 @@ ds5_protocol_result_t ds5_build_bt_output_transaction(
     size_t bt_transaction_capacity,
     size_t *bt_transaction_length);
 
+ds5_protocol_result_t ds5_build_usb_microphone_mute_report(
+    bool muted,
+    uint8_t *usb_report,
+    size_t usb_report_capacity);
+
 /*
- * Build the startup state report emitted by original src/bt.cpp after the
- * HID Interrupt channel opens. mic_select is the original two-bit setting.
+ * Build the startup state report after the HID Interrupt channel opens.
+ * mic_select is the original two-bit setting; mic mute and its LED start off.
  */
 ds5_protocol_result_t ds5_build_bt_initialization_transaction(
     uint8_t mic_select,

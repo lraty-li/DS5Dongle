@@ -166,6 +166,31 @@ ds5_protocol_result_t ds5_build_bt_output_transaction(
     return DS5_PROTOCOL_OK;
 }
 
+ds5_protocol_result_t ds5_build_usb_microphone_mute_report(
+    bool muted,
+    uint8_t *usb_report,
+    size_t usb_report_capacity)
+{
+    if (usb_report == NULL) {
+        return DS5_PROTOCOL_ERROR_ARGUMENT;
+    }
+
+    if (usb_report_capacity < DS5_USB_OUTPUT_REPORT_SIZE) {
+        return DS5_PROTOCOL_ERROR_CAPACITY;
+    }
+
+    memset(usb_report, 0, DS5_USB_OUTPUT_REPORT_SIZE);
+    usb_report[0] = DS5_USB_OUTPUT_REPORT_ID;
+    usb_report[DS5_USB_OUTPUT_VALID_FLAGS1_OFFSET] =
+        DS5_USB_OUTPUT_ALLOW_MUTE_LIGHT |
+        DS5_USB_OUTPUT_ALLOW_AUDIO_MUTE;
+    usb_report[DS5_USB_OUTPUT_MUTE_LIGHT_OFFSET] =
+        muted ? DS5_USB_OUTPUT_MUTE_LIGHT_ON : 0U;
+    usb_report[DS5_USB_OUTPUT_MUTE_CONTROL_OFFSET] =
+        muted ? DS5_USB_OUTPUT_MIC_MUTE : 0U;
+    return DS5_PROTOCOL_OK;
+}
+
 ds5_protocol_result_t ds5_build_bt_initialization_transaction(
     uint8_t mic_select,
     uint8_t *bt_transaction,
@@ -197,10 +222,10 @@ ds5_protocol_result_t ds5_build_bt_initialization_transaction(
     report[2] = DS5_BT_INITIALIZATION_FLAGS;
     report[3] = DS5_BT_INITIALIZATION_MODE;
 
-    /* Exact SetStateData fields initialized by original src/bt.cpp. */
+    /* SetStateData startup fields, including a defined unmuted mic state. */
     state = &report[DS5_BT_INITIALIZATION_STATE_OFFSET];
     state[0] = 0x80U; /* AllowAudioControl */
-    state[1] = 0x04U; /* AllowLedColor */
+    state[1] = 0x07U; /* AllowMuteLight, AllowAudioMute, AllowLedColor */
     state[7] = mic_select; /* MicSelect */
     state[38] = 0x03U; /* Light brightness and fade-animation controls */
     state[41] = 0x02U; /* LightFadeAnimation::FadeOut */
