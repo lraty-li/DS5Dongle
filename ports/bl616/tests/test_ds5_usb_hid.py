@@ -171,10 +171,24 @@ class Ds5UsbHidTests(unittest.TestCase):
 
     def test_feature_cache_is_bounded_and_double_buffered(self):
         source = FEATURE_CACHE_SOURCE.read_text(encoding="utf-8")
+        header = (BL616_DIR / "ds5" / "ds5_feature_cache.h").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("DS5_FEATURE_CACHE_ENTRY_COUNT 4U", source)
         self.assertIn("DS5_FEATURE_CACHE_BANK_COUNT  2U", source)
+        self.assertIn("DS5_FEATURE_CACHE_MAX_PAYLOAD     63U", header)
+        self.assertIn("DS5_FEATURE_CACHE_MAX_REPORT_SIZE 64U", header)
         self.assertNotIn("malloc(", source)
+
+    def test_feature_cache_restores_usb_report_id(self):
+        source = FEATURE_CACHE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("entry->data[bank][0] = report_id;", source)
+        self.assertIn(
+            "memcpy(&entry->data[bank][1], payload, length);", source
+        )
+        self.assertIn("entry->length[bank] = length + 1U;", source)
 
     def test_bluetooth_publishes_only_validated_payload(self):
         source = BT_SOURCE.read_text(encoding="utf-8")
