@@ -20,6 +20,12 @@
 #define DS5_BT_CONNECTION_RETRY_MS 1000U
 #define DS5_BT_RECONNECT_TIMEOUT_MS 20000U
 
+/* Stop the MCU core while the scheduler has no ready application task. */
+void vApplicationIdleHook(void)
+{
+    __asm volatile("wfi" ::: "memory");
+}
+
 static void app_start_task(void *parameter)
 {
     ds5_bt_state_t bluetooth_state;
