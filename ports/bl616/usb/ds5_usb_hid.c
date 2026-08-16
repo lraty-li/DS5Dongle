@@ -279,6 +279,7 @@ static bool ds5_usb_hid_publish_output(const uint8_t *report, size_t length)
         return false;
     }
 
+    ds5_bt_tx_wake();
     ds5_usb_hid_notify();
     return true;
 }
@@ -302,6 +303,7 @@ static bool ds5_usb_hid_publish_feature_set(uint8_t report_id,
         return false;
     }
 
+    ds5_bt_tx_wake();
     ds5_usb_hid_notify();
     return true;
 }

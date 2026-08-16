@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include <FreeRTOS.h>
+#include "portmacro.h"
 #include "task.h"
 
 #include "bluetooth.h"
@@ -34,7 +35,7 @@
 #define DS5_BT_WORKER_STACK_DEPTH     (configMINIMAL_STACK_SIZE * 4U)
 #define DS5_BT_TX_WORKER_STACK_DEPTH  (configMINIMAL_STACK_SIZE * 6U)
 #define DS5_BT_OUTPUT_READY_TIMEOUT_MS 5000U
-#define DS5_BT_TX_POLL_MS              1U
+#define DS5_BT_TX_RETRY_MS             1U
 #define DS5_BT_DEFAULT_MIC_SELECT      0U
 
 static const uint8_t feature_prefetch_ids[] = {
@@ -114,6 +115,22 @@ static TaskHandle_t worker_task;
 static StaticTask_t tx_worker_task_storage;
 static StackType_t tx_worker_task_stack[DS5_BT_TX_WORKER_STACK_DEPTH];
 static TaskHandle_t tx_worker_task;
+
+void ds5_bt_tx_wake(void)
+{
+    if (tx_worker_task == NULL) {
+        return;
+    }
+
+    if (xPortIsInsideInterrupt()) {
+        BaseType_t task_woken = pdFALSE;
+
+        vTaskNotifyGiveFromISR(tx_worker_task, &task_woken);
+        portYIELD_FROM_ISR(task_woken);
+    } else {
+        xTaskNotifyGive(tx_worker_task);
+    }
+}
 
 static uint16_t ds5_bt_stack_high_water_words(TaskHandle_t task)
 {
@@ -223,6 +240,7 @@ static void ds5_bt_reset_link_state(void)
     headset_connected = false;
     microphone_button_pressed = false;
     ++link_generation;
+    ds5_bt_tx_wake();
 }
 
 static void ds5_bt_return_to_candidate(void)
@@ -601,6 +619,7 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
             initialization_pending = true;
             ds5_bt_set_state(DS5_BT_STATE_READY);
         }
+        ds5_bt_tx_wake();
         break;
     case DS5_L2CAP_EVENT_DISCONNECTED:
         if (event->channel == DS5_L2CAP_CHANNEL_CONTROL) {
@@ -613,6 +632,7 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
             (bluetooth_state != DS5_BT_STATE_DISCONNECTING)) {
             (void)ds5_bt_disconnect_active(BT_HCI_ERR_REMOTE_USER_TERM_CONN);
         }
+        ds5_bt_tx_wake();
         break;
     case DS5_L2CAP_EVENT_DATA:
         ++received_l2cap_packets;
@@ -755,6 +775,7 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
                 if (pressed && !microphone_button_pressed) {
                     if (ds5_output_mailbox_publish_microphone_button_press()) {
                         ++received_microphone_button_presses;
+                        ds5_bt_tx_wake();
                     } else {
                         ++dropped_microphone_button_presses;
                         if (dropped_microphone_button_presses <= 4U) {
@@ -782,6 +803,7 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
         if (active_connection != NULL) {
             (void)ds5_bt_disconnect_active(BT_HCI_ERR_REMOTE_USER_TERM_CONN);
         }
+        ds5_bt_tx_wake();
         break;
     default:
         break;
@@ -1059,6 +1081,7 @@ static void ds5_bt_tx_worker(void *parameter)
 
     while (1) {
         bool did_work = false;
+        bool retry_pending = false;
         uint8_t newer_report[DS5_USB_OUTPUT_REPORT_SIZE];
         bool newest_microphone_state;
 
@@ -1116,6 +1139,8 @@ static void ds5_bt_tx_worker(void *parameter)
                                            sizeof(bt_transaction))) {
                 initialization_pending = false;
                 did_work = true;
+            } else {
+                retry_pending = true;
             }
         }
 
@@ -1125,6 +1150,8 @@ static void ds5_bt_tx_worker(void *parameter)
                                                sizeof(bt_transaction))) {
                 pending_microphone_state = false;
                 did_work = true;
+            } else {
+                retry_pending = true;
             }
         }
 
@@ -1134,6 +1161,8 @@ static void ds5_bt_tx_worker(void *parameter)
                                         sizeof(bt_transaction))) {
                 pending_feature_set = false;
                 did_work = true;
+            } else {
+                retry_pending = true;
             }
         }
 
@@ -1189,6 +1218,8 @@ static void ds5_bt_tx_worker(void *parameter)
                         sizeof(bt_transaction))) {
                     pending_usb_output = false;
                     did_work = true;
+                } else {
+                    retry_pending = true;
                 }
             } else if ((xTaskGetTickCount() - pending_usb_output_since) >=
                        pdMS_TO_TICKS(DS5_BT_OUTPUT_READY_TIMEOUT_MS)) {
@@ -1210,11 +1241,29 @@ static void ds5_bt_tx_worker(void *parameter)
                     sizeof(bt_transaction))) {
                 pending_microphone_mute = false;
                 did_work = true;
+            } else {
+                retry_pending = true;
             }
         }
 
         if (!did_work) {
-            vTaskDelay(pdMS_TO_TICKS(DS5_BT_TX_POLL_MS));
+            TickType_t wait_ticks;
+
+            if (retry_pending) {
+                wait_ticks = pdMS_TO_TICKS(DS5_BT_TX_RETRY_MS);
+            } else if (pending_usb_output) {
+                TickType_t timeout_ticks =
+                    pdMS_TO_TICKS(DS5_BT_OUTPUT_READY_TIMEOUT_MS);
+                TickType_t elapsed_ticks =
+                    xTaskGetTickCount() - pending_usb_output_since;
+
+                wait_ticks = elapsed_ticks >= timeout_ticks ?
+                                 0U : timeout_ticks - elapsed_ticks;
+            } else {
+                wait_ticks = portMAX_DELAY;
+            }
+
+            (void)ulTaskNotifyTake(pdTRUE, wait_ticks);
         }
     }
 }

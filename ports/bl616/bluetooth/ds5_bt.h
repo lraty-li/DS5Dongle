@@ -30,6 +30,8 @@ typedef struct {
 } ds5_bt_diagnostics_t;
 
 int ds5_bt_init(void);
+/* Wake the Bluetooth TX worker after a mailbox or link-state change. */
+void ds5_bt_tx_wake(void);
 int ds5_bt_start_discovery(void);
 bool ds5_bt_candidate_available(void);
 int ds5_bt_connect_candidate(void);

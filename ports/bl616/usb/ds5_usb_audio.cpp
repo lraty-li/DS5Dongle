@@ -16,6 +16,7 @@
 #include "usbd_core.h"
 
 #include "ds5_audio_mailbox.h"
+#include "ds5_bt.h"
 #include "ds5_haptics_mailbox.h"
 #include "ds5_log.h"
 #include "ds5_protocol.h"
@@ -511,6 +512,7 @@ static void ds5_usb_audio_encode_speaker(
 
     if (ds5_audio_mailbox_publish_speaker_opus(opus_frame,
                                                sizeof(opus_frame))) {
+        ds5_bt_tx_wake();
         ++published_speaker_frames;
         if (published_speaker_frames == 1U) {
             ds5_log_printf("DS5 USB Audio: first speaker Opus frame queued\r\n");
@@ -570,6 +572,7 @@ static void ds5_usb_audio_process_packet(
             if (*haptics_position == DS5_HAPTICS_DATA_SIZE) {
                 if (ds5_haptics_mailbox_publish(
                         haptics_data, DS5_HAPTICS_DATA_SIZE)) {
+                    ds5_bt_tx_wake();
                     ++published_haptics_blocks;
                     if (published_haptics_blocks == 1U) {
                         ds5_log_printf("DS5 USB Audio: first haptics block "
@@ -795,13 +798,16 @@ extern "C" void ds5_usb_audio_on_stream_open(uint8_t busid,
         audio_read_pending = false;
         last_audio_completion_us = 0U;
         ds5_audio_mailbox_set_speaker_stream_active(true);
+        ds5_bt_tx_wake();
         ds5_log_printf("DS5 USB Audio: 48 kHz four-channel speaker OUT "
                        "opened\r\n");
         ds5_usb_audio_arm_out();
     } else if (interface == DS5_USB_AUDIO_MICROPHONE_INTERFACE) {
         microphone_stream_open = true;
         microphone_write_pending = false;
-        (void)ds5_audio_mailbox_publish_microphone_stream_active(true);
+        if (ds5_audio_mailbox_publish_microphone_stream_active(true)) {
+            ds5_bt_tx_wake();
+        }
         ds5_log_printf("DS5 USB Audio: 48 kHz stereo microphone IN opened\r\n");
     }
 }
@@ -817,11 +823,14 @@ extern "C" void ds5_usb_audio_on_stream_close(uint8_t busid,
         last_audio_completion_us = 0U;
         ++audio_generation;
         ds5_audio_mailbox_set_speaker_stream_active(false);
+        ds5_bt_tx_wake();
         ds5_log_printf("DS5 USB Audio: speaker OUT closed\r\n");
     } else if (interface == DS5_USB_AUDIO_MICROPHONE_INTERFACE) {
         microphone_stream_open = false;
         microphone_write_pending = false;
-        (void)ds5_audio_mailbox_publish_microphone_stream_active(false);
+        if (ds5_audio_mailbox_publish_microphone_stream_active(false)) {
+            ds5_bt_tx_wake();
+        }
         ds5_log_printf("DS5 USB Audio: microphone IN closed\r\n");
     }
 }
@@ -1046,6 +1055,7 @@ void ds5_usb_audio_deinit(void)
     last_audio_completion_us = 0U;
     ds5_audio_mailbox_set_speaker_stream_active(false);
     (void)ds5_audio_mailbox_publish_microphone_stream_active(false);
+    ds5_bt_tx_wake();
 
     if (audio_task != NULL) {
         vTaskDelete(audio_task);
@@ -1081,6 +1091,7 @@ void ds5_usb_audio_handle_event(uint8_t busid, uint8_t event)
         ++audio_generation;
         ds5_audio_mailbox_set_speaker_stream_active(false);
         (void)ds5_audio_mailbox_publish_microphone_stream_active(false);
+        ds5_bt_tx_wake();
         break;
     default:
         break;

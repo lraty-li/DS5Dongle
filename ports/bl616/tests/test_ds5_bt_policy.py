@@ -174,6 +174,15 @@ class Ds5BtPolicyTests(unittest.TestCase):
         self.assertIn("ds5_l2cap_send", helper)
         self.assertIn("ds5_feature_set_mailbox_try_receive", source)
 
+    def test_tx_worker_waits_for_events_when_idle(self):
+        source = BT_SOURCE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("void ds5_bt_tx_wake(void)", source)
+        self.assertIn("ulTaskNotifyTake(pdTRUE, wait_ticks)", source)
+        self.assertIn("wait_ticks = portMAX_DELAY", source)
+        self.assertIn("DS5_BT_TX_RETRY_MS", source)
+        self.assertNotIn("DS5_BT_TX_POLL_MS", source)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
