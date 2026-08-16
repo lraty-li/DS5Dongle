@@ -8,6 +8,7 @@ REPO_ROOT = BL616_DIR.parents[1]
 HID_HEADER = BL616_DIR / "usb" / "ds5_usb_hid.h"
 HID_SOURCE = BL616_DIR / "usb" / "ds5_usb_hid.c"
 USB_SOURCE = BL616_DIR / "usb" / "ds5_usb_log.c"
+MAIN_SOURCE = BL616_DIR / "main.c"
 MAILBOX_SOURCE = BL616_DIR / "platform" / "ds5_input_mailbox.c"
 OUTPUT_MAILBOX_SOURCE = BL616_DIR / "platform" / "ds5_output_mailbox.c"
 FEATURE_SET_MAILBOX_SOURCE = BL616_DIR / "platform" / "ds5_feature_set_mailbox.c"
@@ -82,6 +83,31 @@ class Ds5UsbHidTests(unittest.TestCase):
         # wait after a fresh Bluetooth input report becomes available.
         self.assertEqual(constants["DS5_USB_HID_POLL_INTERVAL"], 1)
         self.assertEqual(source.count("DS5_USB_HID_POLL_INTERVAL"), 2)
+
+    def test_usb_device_activation_is_separate_from_class_registration(self):
+        source = USB_SOURCE.read_text(encoding="utf-8")
+        init_start = source.index("int ds5_usb_log_init(void)")
+        init_end = source.index("int ds5_usb_log_set_active", init_start)
+        init_function = source[init_start:init_end]
+        active_function = source[init_end:]
+
+        self.assertNotIn("usbd_initialize", init_function)
+        self.assertIn("int ds5_usb_log_set_active(bool active)", source)
+        self.assertIn("usbd_initialize", active_function)
+        self.assertIn("usbd_deinitialize", active_function)
+
+    def test_usb_classes_reset_state_when_device_is_deinitialized(self):
+        hid_source = HID_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("case USBD_EVENT_DEINIT:", hid_source)
+
+    def test_usb_activation_follows_ready_bluetooth_state(self):
+        source = MAIN_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("bluetooth_state == DS5_BT_STATE_READY", source)
+        self.assertIn(
+            "ds5_usb_log_set_active(should_usb_active)", source
+        )
 
     def test_hid_out_reads_exact_wire_report_size(self):
         source = HID_SOURCE.read_text(encoding="utf-8")

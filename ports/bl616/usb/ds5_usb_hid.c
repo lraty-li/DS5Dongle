@@ -521,6 +521,7 @@ void ds5_usb_hid_handle_event(uint8_t busid, uint8_t event)
     switch (event) {
     case USBD_EVENT_RESET:
     case USBD_EVENT_DISCONNECTED:
+    case USBD_EVENT_DEINIT:
         hid_configured = false;
         hid_suspended = false;
         hid_busy = false;

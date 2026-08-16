@@ -140,6 +140,9 @@ static const struct usb_descriptor descriptors = {
     .string_descriptor_callback = string_descriptor_callback,
 };
 
+static bool usb_classes_initialized;
+static bool usb_active;
+
 static void ds5_usb_event_handler(uint8_t busid, uint8_t event)
 {
     ds5_usb_hid_handle_event(busid, event);
@@ -149,6 +152,10 @@ static void ds5_usb_event_handler(uint8_t busid, uint8_t event)
 int ds5_usb_log_init(void)
 {
     int err;
+
+    if (usb_classes_initialized) {
+        return 0;
+    }
 
     usbd_desc_register(DS5_USB_BUS_ID, &descriptors);
 
@@ -167,12 +174,29 @@ int ds5_usb_log_init(void)
         return err;
     }
 
-    err = usbd_initialize(DS5_USB_BUS_ID, 0U, ds5_usb_event_handler);
-    if (err != 0) {
-        ds5_usb_audio_deinit();
-        ds5_usb_hid_deinit();
-        return err;
-    }
+    usb_classes_initialized = true;
+    usb_active = false;
 
     return 0;
+}
+
+int ds5_usb_log_set_active(bool active)
+{
+    int err;
+
+    if (!usb_classes_initialized || (usb_active == active)) {
+        return 0;
+    }
+
+    if (active) {
+        err = usbd_initialize(DS5_USB_BUS_ID, 0U, ds5_usb_event_handler);
+    } else {
+        err = usbd_deinitialize(DS5_USB_BUS_ID);
+    }
+
+    if (err == 0) {
+        usb_active = active;
+    }
+
+    return err;
 }

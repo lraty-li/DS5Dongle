@@ -1083,6 +1083,7 @@ void ds5_usb_audio_handle_event(uint8_t busid, uint8_t event)
     case USBD_EVENT_RESET:
     case USBD_EVENT_DISCONNECTED:
     case USBD_EVENT_SUSPEND:
+    case USBD_EVENT_DEINIT:
         speaker_stream_open = false;
         microphone_stream_open = false;
         audio_read_pending = false;

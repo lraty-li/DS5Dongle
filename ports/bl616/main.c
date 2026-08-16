@@ -31,6 +31,8 @@ static void app_start_task(void *parameter)
     ds5_bt_state_t bluetooth_state;
     ds5_bt_state_t previous_state = DS5_BT_STATE_OFF;
     TickType_t reconnect_wait_since = 0U;
+    bool usb_initialized = false;
+    bool usb_active = false;
     int err;
 
     (void)parameter;
@@ -50,11 +52,30 @@ static void app_start_task(void *parameter)
         ds5_log_printf("DS5 USB: HID/UAC initialization failed (err %d)\r\n",
                        err);
     } else {
-        ds5_log_printf("DS5 USB: HID/UAC composite initialized\r\n");
+        usb_initialized = true;
+        ds5_log_printf("DS5 USB: HID/UAC classes registered\r\n");
     }
 
     while (1) {
         bluetooth_state = ds5_bt_get_state();
+
+        if (usb_initialized) {
+            bool should_usb_active =
+                bluetooth_state == DS5_BT_STATE_READY;
+
+            if (should_usb_active != usb_active) {
+                err = ds5_usb_log_set_active(should_usb_active);
+                if (err != 0) {
+                    ds5_log_printf(
+                        "DS5 USB: failed to %s USB device (err %d)\r\n",
+                        should_usb_active ? "connect" : "disconnect", err);
+                } else {
+                    usb_active = should_usb_active;
+                    ds5_log_printf("DS5 USB: device %s\r\n",
+                                   usb_active ? "connected" : "disconnected");
+                }
+            }
+        }
 
         /* Restart the passive-reconnect timer every time we enter wait. */
         if (bluetooth_state != previous_state) {
