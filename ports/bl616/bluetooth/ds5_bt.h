@@ -10,21 +10,25 @@ extern "C" {
 
 typedef enum {
     DS5_BT_STATE_OFF = 0,
-    DS5_BT_STATE_DISCOVERING,
-    DS5_BT_STATE_IDLE,
-    DS5_BT_STATE_CANDIDATE_READY,
-    DS5_BT_STATE_RECONNECT_WAIT,
-    DS5_BT_STATE_ACL_CONNECTING,
-    DS5_BT_STATE_SECURING,
-    DS5_BT_STATE_L2CAP_CONNECTING,
-    DS5_BT_STATE_READY,
-    DS5_BT_STATE_DISCONNECTING,
+    DS5_BT_STATE_DISCOVERING = 1,
+    DS5_BT_STATE_IDLE = 2,
+    DS5_BT_STATE_CANDIDATE_READY = 3,
+    /* Value 4 was RECONNECT_WAIT in diagnostic protocol version 1. */
+    DS5_BT_STATE_ACL_CONNECTING = 5,
+    DS5_BT_STATE_SECURING = 6,
+    DS5_BT_STATE_L2CAP_CONNECTING = 7,
+    DS5_BT_STATE_READY = 8,
+    DS5_BT_STATE_DISCONNECTING = 9,
 } ds5_bt_state_t;
 
 typedef struct {
     ds5_bt_state_t state;
     bool control_channel_ready;
     bool interrupt_channel_ready;
+    bool bonded_peer_valid;
+    bool discovery_active;
+    bool pairing_window_active;
+    uint32_t link_generation;
     uint16_t worker_task_stack_high_water_words;
     uint16_t tx_worker_task_stack_high_water_words;
 } ds5_bt_diagnostics_t;
@@ -42,11 +46,8 @@ ds5_bt_state_t ds5_bt_get_state(void);
 uint32_t ds5_bt_received_l2cap_packet_count(void);
 void ds5_bt_get_diagnostics(ds5_bt_diagnostics_t *diagnostics);
 
-/*
- * Leave RECONNECT_WAIT after a timeout and fall back to active discovery +
- * connection.  The saved bond is kept; reconnecting uses the existing link
- * key, and an invalidated key falls back to fresh pairing.
- */
+/* Start an active BR/EDR pairing-discovery window.  A bonded peer remains
+ * passively connectable while this window is running. */
 int ds5_bt_fallback_to_discovery(void);
 
 #ifdef __cplusplus

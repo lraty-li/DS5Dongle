@@ -34,9 +34,16 @@
 #define DS5_BT_CANDIDATE_NAME_SIZE    64U
 #define DS5_BT_WORKER_STACK_DEPTH     (configMINIMAL_STACK_SIZE * 4U)
 #define DS5_BT_TX_WORKER_STACK_DEPTH  (configMINIMAL_STACK_SIZE * 6U)
+#define DS5_BT_POLICY_STACK_DEPTH     (configMINIMAL_STACK_SIZE * 3U)
 #define DS5_BT_OUTPUT_READY_TIMEOUT_MS 5000U
 #define DS5_BT_TX_RETRY_MS             1U
 #define DS5_BT_DEFAULT_MIC_SELECT      0U
+#define DS5_BT_PAIRING_WINDOW_MS      20000U
+#define DS5_BT_DISCOVERY_RETRY_MS     750U
+#define DS5_BT_ACL_TIMEOUT_MS          10000U
+#define DS5_BT_SECURITY_TIMEOUT_MS     5000U
+#define DS5_BT_L2CAP_TIMEOUT_MS        5000U
+#define DS5_BT_DISCONNECT_TIMEOUT_MS   5000U
 
 static const uint8_t feature_prefetch_ids[] = {
     0x09U,
@@ -47,7 +54,6 @@ static const uint8_t feature_prefetch_ids[] = {
 
 typedef struct {
     bool valid;
-    bool saved_address;
     bt_addr_t address;
     uint32_t device_class;
     int8_t rssi;
@@ -58,6 +64,19 @@ typedef struct {
 static struct bt_br_discovery_result
     discovery_results[DS5_BT_DISCOVERY_RESULT_COUNT];
 static ds5_bt_candidate_t candidate;
+/*
+ * Policy has three independent pieces of state:
+ *
+ *   - bonded_peer_* is persistent identity policy restored from link keys;
+ *   - candidate is only the result of one active inquiry;
+ *   - active_connection/link_generation is the current ACL session.
+ *
+ * In particular, a passive page scan for the bonded peer is not represented
+ * by a blocking state such as RECONNECT_WAIT.  Active inquiry is a separate,
+ * time-limited pairing window.
+ */
+static bt_addr_t bonded_peer_address;
+static volatile bool bonded_peer_valid;
 
 /*
  * BouffaloSDK v2.3.30 keeps the locally-created BR connection's sticky
@@ -66,6 +85,10 @@ static ds5_bt_candidate_t candidate;
  * the application (matching bredr_cli_cmds.c in this SDK).
  */
 static struct bt_conn *active_connection;
+static bool active_peer_is_bonded;
+static bool active_peer_should_persist_bond;
+static bool outgoing_create_pending;
+static bt_addr_t outgoing_target_address;
 
 static volatile ds5_bt_state_t bluetooth_state = DS5_BT_STATE_OFF;
 static bool outgoing_acl;
@@ -103,6 +126,17 @@ static uint8_t haptics_packet_counter;
 static bool headset_connected;
 static bool microphone_button_pressed;
 static volatile uint32_t link_generation;
+static volatile bool discovery_in_flight;
+static volatile bool discovery_allowed;
+static volatile bool discovery_stop_requested;
+static volatile bool pairing_window_active;
+static TickType_t pairing_window_deadline;
+static TickType_t discovery_retry_at;
+static TickType_t candidate_retry_at;
+static TickType_t link_deadline;
+static TickType_t bond_recovery_retry_at;
+static uint32_t discovery_session;
+static volatile bool bond_recovery_pending;
 
 static const struct bt_br_discovery_param discovery_param = {
     .length = DS5_BT_DISCOVERY_LENGTH,
@@ -115,6 +149,14 @@ static TaskHandle_t worker_task;
 static StaticTask_t tx_worker_task_storage;
 static StackType_t tx_worker_task_stack[DS5_BT_TX_WORKER_STACK_DEPTH];
 static TaskHandle_t tx_worker_task;
+static StaticTask_t policy_task_storage;
+static StackType_t policy_task_stack[DS5_BT_POLICY_STACK_DEPTH];
+static TaskHandle_t policy_task;
+
+static void ds5_bt_policy_wake(void);
+static void ds5_bt_open_pairing_window(void);
+static void ds5_bt_recover_after_link(bool bonded_link);
+static bool ds5_bt_deadline_expired(TickType_t now, TickType_t deadline);
 
 void ds5_bt_tx_wake(void)
 {
@@ -129,6 +171,22 @@ void ds5_bt_tx_wake(void)
         portYIELD_FROM_ISR(task_woken);
     } else {
         xTaskNotifyGive(tx_worker_task);
+    }
+}
+
+static void ds5_bt_policy_wake(void)
+{
+    if (policy_task == NULL) {
+        return;
+    }
+
+    if (xPortIsInsideInterrupt()) {
+        BaseType_t task_woken = pdFALSE;
+
+        vTaskNotifyGiveFromISR(policy_task, &task_woken);
+        portYIELD_FROM_ISR(task_woken);
+    } else {
+        xTaskNotifyGive(policy_task);
     }
 }
 
@@ -156,8 +214,6 @@ static const char *ds5_bt_state_name(ds5_bt_state_t state)
         return "idle";
     case DS5_BT_STATE_CANDIDATE_READY:
         return "candidate-ready";
-    case DS5_BT_STATE_RECONNECT_WAIT:
-        return "reconnect-wait";
     case DS5_BT_STATE_ACL_CONNECTING:
         return "acl-connecting";
     case DS5_BT_STATE_SECURING:
@@ -182,8 +238,30 @@ static void ds5_bt_set_state(ds5_bt_state_t state)
     }
 
     bluetooth_state = state;
+    link_deadline = 0U;
+    switch (state) {
+    case DS5_BT_STATE_ACL_CONNECTING:
+        link_deadline = xTaskGetTickCount() +
+                        pdMS_TO_TICKS(DS5_BT_ACL_TIMEOUT_MS);
+        break;
+    case DS5_BT_STATE_SECURING:
+        link_deadline = xTaskGetTickCount() +
+                        pdMS_TO_TICKS(DS5_BT_SECURITY_TIMEOUT_MS);
+        break;
+    case DS5_BT_STATE_L2CAP_CONNECTING:
+        link_deadline = xTaskGetTickCount() +
+                        pdMS_TO_TICKS(DS5_BT_L2CAP_TIMEOUT_MS);
+        break;
+    case DS5_BT_STATE_DISCONNECTING:
+        link_deadline = xTaskGetTickCount() +
+                        pdMS_TO_TICKS(DS5_BT_DISCONNECT_TIMEOUT_MS);
+        break;
+    default:
+        break;
+    }
     printf("DS5 BT: state %s -> %s\r\n",
            ds5_bt_state_name(previous), ds5_bt_state_name(state));
+    ds5_bt_policy_wake();
 }
 
 static bool ds5_bt_get_br_address(const struct bt_conn *conn,
@@ -225,9 +303,146 @@ static bool ds5_bt_connection_matches_candidate(const struct bt_conn *conn)
            (bt_addr_cmp(address, &candidate.address) == 0);
 }
 
+static bool ds5_bt_connection_matches_saved_peer(const struct bt_conn *conn)
+{
+    const bt_addr_t *address;
+
+    return bonded_peer_valid &&
+           ds5_bt_get_br_address(conn, &address) &&
+           (bt_addr_cmp(address, &bonded_peer_address) == 0);
+}
+
+static bool ds5_bt_connection_matches_outgoing_target(
+    const struct bt_conn *conn)
+{
+    const bt_addr_t *address;
+
+    return outgoing_create_pending &&
+           ds5_bt_get_br_address(conn, &address) &&
+           (bt_addr_cmp(address, &outgoing_target_address) == 0);
+}
+
+/*
+ * The policy task and the BR callback can both observe the end of an ACL
+ * create request.  Keep the ownership transition in one small critical
+ * section so they cannot both install different active sessions.
+ */
+static bool ds5_bt_claim_active_connection(struct bt_conn *conn,
+                                           bool outgoing,
+                                           bool bonded,
+                                           bool persist_bond)
+{
+    bool claimed;
+
+    if (conn == NULL) {
+        return false;
+    }
+
+    taskENTER_CRITICAL();
+    if (active_connection == NULL) {
+        active_connection = conn;
+        outgoing_acl = outgoing;
+        active_peer_is_bonded = bonded;
+        active_peer_should_persist_bond = persist_bond;
+        ++link_generation;
+        ds5_l2cap_set_session(conn, link_generation);
+    }
+    claimed = active_connection == conn;
+    taskEXIT_CRITICAL();
+
+    return claimed;
+}
+
+static void ds5_bt_remember_bonded_peer(const struct bt_conn *conn)
+{
+    const bt_addr_t *address;
+
+    if (ds5_bt_get_br_address(conn, &address)) {
+        bt_addr_copy(&bonded_peer_address, address);
+        bonded_peer_valid = true;
+    }
+}
+
+static void ds5_bt_enable_bonded_page_scan(void)
+{
+    int err;
+
+    if (!bonded_peer_valid) {
+        return;
+    }
+
+    err = bt_br_set_connectable(true);
+    if ((err != 0) && (err != -EALREADY)) {
+        printf("DS5 BT: bonded page scan enable failed (err %d)\r\n", err);
+    }
+}
+
+static void ds5_bt_disable_page_scan(void)
+{
+    int err = bt_br_set_connectable(false);
+
+    if ((err != 0) && (err != -EALREADY)) {
+        printf("DS5 BT: page scan disable failed (err %d)\r\n", err);
+    }
+}
+
+static int ds5_bt_forget_bonded_peer(void)
+{
+    bt_addr_le_t address = {
+        .type = BT_ADDR_LE_PUBLIC,
+    };
+
+    if (!bonded_peer_valid) {
+        return 0;
+    }
+
+    /* BR/EDR link keys are addressed as LE public addresses by bt_unpair(). */
+    bt_addr_copy(&address.a, &bonded_peer_address);
+    return bt_unpair(BT_ID_DEFAULT, &address);
+}
+
+static void ds5_bt_request_bond_recovery(void)
+{
+    if (!active_peer_is_bonded) {
+        return;
+    }
+
+    bond_recovery_pending = true;
+    bond_recovery_retry_at = xTaskGetTickCount();
+    ds5_bt_policy_wake();
+}
+
+static void ds5_bt_close_pairing_window(void)
+{
+    discovery_allowed = false;
+    pairing_window_active = false;
+    pairing_window_deadline = 0U;
+    ds5_bt_policy_wake();
+}
+
+static void ds5_bt_open_pairing_window(void)
+{
+    TickType_t now = xTaskGetTickCount();
+
+    discovery_allowed = true;
+    pairing_window_active = true;
+    pairing_window_deadline = now + pdMS_TO_TICKS(DS5_BT_PAIRING_WINDOW_MS);
+    discovery_retry_at = now;
+    candidate_retry_at = now;
+    ds5_bt_policy_wake();
+}
+
 static void ds5_bt_reset_link_state(void)
 {
+    struct bt_conn *connection = active_connection;
+
+    /* Tear down any old channels before a new ACL can reuse their objects. */
+    (void)ds5_l2cap_disconnect();
+    ds5_l2cap_clear_session(connection);
     active_connection = NULL;
+    active_peer_is_bonded = false;
+    active_peer_should_persist_bond = false;
+    outgoing_create_pending = false;
     outgoing_acl = false;
     control_channel_ready = false;
     interrupt_channel_ready = false;
@@ -239,19 +454,23 @@ static void ds5_bt_reset_link_state(void)
     haptics_packet_counter = 0U;
     headset_connected = false;
     microphone_button_pressed = false;
+    ds5_feature_cache_clear();
     ++link_generation;
     ds5_bt_tx_wake();
+    ds5_bt_policy_wake();
 }
 
-static void ds5_bt_return_to_candidate(void)
+static void ds5_bt_recover_after_link(bool bonded_link)
 {
-    if (!candidate.valid) {
-        ds5_bt_set_state(DS5_BT_STATE_IDLE);
-    } else if (candidate.saved_address) {
-        ds5_bt_set_state(DS5_BT_STATE_RECONNECT_WAIT);
-    } else {
-        ds5_bt_set_state(DS5_BT_STATE_CANDIDATE_READY);
+    memset(&candidate, 0, sizeof(candidate));
+    if (bonded_link) {
+        printf("DS5 BT: bonded peer link ended; restoring passive page "
+               "scan\r\n");
     }
+    /* The pinned SDK clears page scan after every BR terminal event. */
+    ds5_bt_enable_bonded_page_scan();
+    ds5_bt_open_pairing_window();
+    ds5_bt_set_state(DS5_BT_STATE_IDLE);
 }
 
 static int ds5_bt_disconnect_active(uint8_t reason)
@@ -298,34 +517,79 @@ static void ds5_bt_security_ready(struct bt_conn *conn)
 
 static void ds5_bt_connected(struct bt_conn *conn, u8_t err)
 {
+    bool matches_candidate;
+    bool matches_bonded;
+    bool matches_outgoing_target;
     int security_result;
 
     if (err != 0U) {
         if (conn == active_connection) {
+            bool bonded_link = active_peer_is_bonded;
+
             printf("DS5 BT: ACL connection failed (err %u)\r\n",
                    (unsigned int)err);
             ds5_bt_reset_link_state();
-            ds5_bt_return_to_candidate();
+            ds5_bt_recover_after_link(bonded_link);
+        } else {
+            matches_outgoing_target =
+                ds5_bt_connection_matches_outgoing_target(conn);
+            if (matches_outgoing_target) {
+                printf("DS5 BT: outgoing ACL connection failed (err %u)\r\n",
+                       (unsigned int)err);
+                outgoing_create_pending = false;
+                if (active_connection == NULL) {
+                    memset(&candidate, 0, sizeof(candidate));
+                    ds5_bt_set_state(DS5_BT_STATE_IDLE);
+                    ds5_bt_open_pairing_window();
+                }
+            }
+
+            /* A rejected/failed BR attempt also disables SDK page scan. */
+            ds5_bt_enable_bonded_page_scan();
         }
         return;
     }
 
+    matches_candidate = ds5_bt_connection_matches_candidate(conn);
+    matches_bonded = ds5_bt_connection_matches_saved_peer(conn);
+    matches_outgoing_target =
+        ds5_bt_connection_matches_outgoing_target(conn);
     if (active_connection == NULL) {
-        if (!ds5_bt_connection_matches_candidate(conn)) {
+        if (!matches_candidate && !matches_bonded) {
             ds5_bt_print_connection_address(conn,
                                             "rejecting unselected peer");
             (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+            ds5_bt_enable_bonded_page_scan();
             return;
         }
 
-        active_connection = conn;
-        outgoing_acl = false;
+        if (!matches_candidate) {
+            ds5_bt_print_connection_address(conn,
+                                            "accepting saved peer");
+        }
+
+        if (!ds5_bt_claim_active_connection(
+                conn, matches_outgoing_target, matches_bonded,
+                matches_candidate || matches_bonded ||
+                    matches_outgoing_target)) {
+            ds5_bt_print_connection_address(conn,
+                                            "rejecting additional peer");
+            (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+            ds5_bt_enable_bonded_page_scan();
+            return;
+        }
+
+        /* A saved incoming peer wins over a still-pending other target. */
+        outgoing_create_pending = false;
     } else if (active_connection != conn) {
         ds5_bt_print_connection_address(conn, "rejecting additional peer");
         (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        ds5_bt_enable_bonded_page_scan();
         return;
     }
 
+    memset(&candidate, 0, sizeof(candidate));
+    ds5_bt_close_pairing_window();
     ds5_bt_print_connection_address(conn, "ACL connected to");
     ds5_bt_set_state(DS5_BT_STATE_SECURING);
 
@@ -333,6 +597,7 @@ static void ds5_bt_connected(struct bt_conn *conn, u8_t err)
     if (security_result != 0) {
         printf("DS5 BT: security request failed (err %d)\r\n",
                security_result);
+        ds5_bt_request_bond_recovery();
         (void)ds5_bt_disconnect_active(BT_HCI_ERR_AUTH_FAIL);
         return;
     }
@@ -345,14 +610,29 @@ static void ds5_bt_connected(struct bt_conn *conn, u8_t err)
 
 static void ds5_bt_disconnected(struct bt_conn *conn, u8_t reason)
 {
+    bool bonded_link;
+
     if (conn != active_connection) {
+        if (ds5_bt_connection_matches_outgoing_target(conn)) {
+            outgoing_create_pending = false;
+            if (active_connection == NULL) {
+                memset(&candidate, 0, sizeof(candidate));
+                ds5_bt_set_state(DS5_BT_STATE_IDLE);
+                ds5_bt_open_pairing_window();
+            }
+        }
+
+        /* The SDK clears page scan for every BR disconnection, including
+         * rejected/short-lived peers that never became active_connection. */
+        ds5_bt_enable_bonded_page_scan();
         return;
     }
 
     printf("DS5 BT: ACL disconnected (reason 0x%02x)\r\n",
            (unsigned int)reason);
+    bonded_link = active_peer_is_bonded;
     ds5_bt_reset_link_state();
-    ds5_bt_return_to_candidate();
+    ds5_bt_recover_after_link(bonded_link);
 }
 
 static void ds5_bt_security_changed(struct bt_conn *conn, bt_security_t level,
@@ -366,10 +646,15 @@ static void ds5_bt_security_changed(struct bt_conn *conn, bt_security_t level,
            (unsigned int)level, (int)err);
 
     if ((err != BT_SECURITY_ERR_SUCCESS) || (level < BT_SECURITY_L2)) {
+        ds5_bt_request_bond_recovery();
         (void)ds5_bt_disconnect_active(BT_HCI_ERR_AUTH_FAIL);
         return;
     }
 
+    if (active_peer_is_bonded) {
+        bond_recovery_pending = false;
+        bond_recovery_retry_at = 0U;
+    }
     ds5_bt_security_ready(conn);
 }
 
@@ -420,8 +705,11 @@ static void ds5_bt_auth_pincode_entry(struct bt_conn *conn, bool highsec)
 static void ds5_bt_pairing_complete(struct bt_conn *conn, bool bonded)
 {
     if (conn == active_connection) {
-        if (bonded && ds5_bt_connection_matches_candidate(conn)) {
-            candidate.saved_address = true;
+        if (bonded && active_peer_should_persist_bond) {
+            ds5_bt_remember_bonded_peer(conn);
+            active_peer_is_bonded = true;
+            bond_recovery_pending = false;
+            bond_recovery_retry_at = 0U;
         }
         printf("DS5 BT: pairing complete (bonded %u)\r\n",
                bonded ? 1U : 0U);
@@ -433,6 +721,7 @@ static void ds5_bt_pairing_failed(struct bt_conn *conn,
 {
     if (conn == active_connection) {
         printf("DS5 BT: pairing failed (reason %d)\r\n", (int)reason);
+        ds5_bt_request_bond_recovery();
     }
 }
 
@@ -456,7 +745,10 @@ static void ds5_bt_consider_candidate(
     const struct bt_br_discovery_result *result,
     uint32_t device_class, const char *name)
 {
-    uint16_t score = ds5_bt_policy_candidate_score(device_class, name, false);
+    bool saved_address_match = bonded_peer_valid &&
+        (bt_addr_cmp(&result->addr, &bonded_peer_address) == 0);
+    uint16_t score = ds5_bt_policy_candidate_score(
+        device_class, name, saved_address_match);
 
     if (score == 0U) {
         return;
@@ -469,7 +761,6 @@ static void ds5_bt_consider_candidate(
     }
 
     candidate.valid = true;
-    candidate.saved_address = false;
     bt_addr_copy(&candidate.address, &result->addr);
     candidate.device_class = device_class;
     candidate.rssi = result->rssi;
@@ -492,22 +783,33 @@ static void ds5_bt_restore_bond(const struct bt_br_bond_info *info,
     }
 
     ++(*bond_count);
-    if (candidate.valid) {
-        return;
+    if (!bonded_peer_valid) {
+        bt_addr_copy(&bonded_peer_address, info->addr);
+        bonded_peer_valid = true;
     }
-
-    memset(&candidate, 0, sizeof(candidate));
-    candidate.valid = true;
-    candidate.saved_address = true;
-    bt_addr_copy(&candidate.address, info->addr);
-    candidate.rssi = INT8_MIN;
-    candidate.score = ds5_bt_policy_candidate_score(0U, NULL, true);
 }
 
 static void ds5_bt_discovery_complete(struct bt_br_discovery_result *results,
                                       size_t count)
 {
     size_t index;
+
+    discovery_in_flight = false;
+    discovery_stop_requested = false;
+    discovery_retry_at = xTaskGetTickCount() +
+                         pdMS_TO_TICKS(DS5_BT_DISCOVERY_RETRY_MS);
+
+    /* A late inquiry completion must never overwrite an active link. */
+    if ((active_connection != NULL) || !discovery_allowed ||
+        (bluetooth_state != DS5_BT_STATE_DISCOVERING)) {
+        memset(&candidate, 0, sizeof(candidate));
+        printf("DS5 BT: discovery completion ignored for current link/policy\r\n");
+        if (bluetooth_state == DS5_BT_STATE_DISCOVERING) {
+            ds5_bt_set_state(DS5_BT_STATE_IDLE);
+        }
+        ds5_bt_policy_wake();
+        return;
+    }
 
     memset(&candidate, 0, sizeof(candidate));
     printf("DS5 BT: discovery complete (%u result(s))\r\n",
@@ -554,6 +856,7 @@ static void ds5_bt_discovery_complete(struct bt_br_discovery_result *results,
         printf("DS5 BT: no gamepad-class candidate found\r\n");
         ds5_bt_set_state(DS5_BT_STATE_IDLE);
     }
+    ds5_bt_policy_wake();
 }
 
 static int ds5_bt_request_next_feature(void)
@@ -596,6 +899,11 @@ static int ds5_bt_request_next_feature(void)
 static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
 {
     ds5_protocol_result_t protocol_result;
+
+    if ((event == NULL) || (event->conn != active_connection) ||
+        (event->session != link_generation)) {
+        return;
+    }
 
     switch (event->type) {
     case DS5_L2CAP_EVENT_CONNECTED:
@@ -1089,6 +1397,9 @@ static void ds5_bt_tx_worker(void *parameter)
             observed_link_generation = link_generation;
             controller_microphone_muted = false;
             pending_microphone_mute = false;
+            pending_microphone_state = true;
+            pending_usb_output = false;
+            pending_haptics = false;
             while (ds5_output_mailbox_try_receive_microphone_button_press()) {
             }
         }
@@ -1268,9 +1579,239 @@ static void ds5_bt_tx_worker(void *parameter)
     }
 }
 
+static bool ds5_bt_deadline_expired(TickType_t now, TickType_t deadline)
+{
+    return (deadline != 0U) && (deadline != portMAX_DELAY) &&
+           ((int32_t)(now - deadline) >= 0);
+}
+
+static TickType_t ds5_bt_ticks_until(TickType_t now, TickType_t deadline)
+{
+    if ((deadline == 0U) || (deadline == portMAX_DELAY)) {
+        return portMAX_DELAY;
+    }
+
+    return ds5_bt_deadline_expired(now, deadline) ? 0U : deadline - now;
+}
+
+static void ds5_bt_process_bond_recovery(TickType_t now)
+{
+    int err;
+
+    if (!bond_recovery_pending || (active_connection != NULL) ||
+        !ds5_bt_deadline_expired(now, bond_recovery_retry_at)) {
+        return;
+    }
+
+    if (!bonded_peer_valid) {
+        bond_recovery_pending = false;
+        return;
+    }
+
+    printf("DS5 BT: saved bond rejected; clearing link key for fresh pairing\r\n");
+    err = ds5_bt_forget_bonded_peer();
+    if (err != 0) {
+        printf("DS5 BT: failed to clear rejected bond (err %d)\r\n", err);
+        bond_recovery_retry_at = now + pdMS_TO_TICKS(1000U);
+        return;
+    }
+
+    bonded_peer_valid = false;
+    bond_recovery_pending = false;
+    bond_recovery_retry_at = 0U;
+    memset(&candidate, 0, sizeof(candidate));
+    ds5_bt_disable_page_scan();
+    ds5_bt_set_state(DS5_BT_STATE_IDLE);
+    ds5_bt_open_pairing_window();
+}
+
+static int ds5_bt_start_discovery_internal(void)
+{
+    int err;
+
+    if ((bluetooth_state != DS5_BT_STATE_IDLE) || discovery_in_flight ||
+        !discovery_allowed || (active_connection != NULL)) {
+        return -EBUSY;
+    }
+
+    memset(&candidate, 0, sizeof(candidate));
+    ++discovery_session;
+    discovery_in_flight = true;
+    discovery_stop_requested = false;
+    ds5_bt_set_state(DS5_BT_STATE_DISCOVERING);
+    err = bt_br_discovery_start(&discovery_param, discovery_results,
+                                DS5_BT_DISCOVERY_RESULT_COUNT,
+                                ds5_bt_discovery_complete);
+    if (err != 0) {
+        discovery_in_flight = false;
+        printf("DS5 BT: discovery start failed (err %d)\r\n", err);
+        ds5_bt_set_state(DS5_BT_STATE_IDLE);
+        discovery_retry_at = xTaskGetTickCount() +
+                             pdMS_TO_TICKS(DS5_BT_DISCOVERY_RETRY_MS);
+        return err;
+    }
+
+    printf("DS5 BT: BR/EDR discovery started (session %lu)\r\n",
+           (unsigned long)discovery_session);
+    return 0;
+}
+
+static void ds5_bt_stop_discovery_if_needed(TickType_t now)
+{
+    int err;
+
+    if (!discovery_in_flight || discovery_allowed ||
+        discovery_stop_requested ||
+        !ds5_bt_deadline_expired(now, discovery_retry_at)) {
+        return;
+    }
+
+    discovery_stop_requested = true;
+    err = bt_br_discovery_stop();
+    if ((err == 0) || (err == -EALREADY)) {
+        /* The pinned SDK does not invoke the completion callback on stop. */
+        discovery_in_flight = false;
+        discovery_stop_requested = false;
+        discovery_retry_at = now + pdMS_TO_TICKS(DS5_BT_DISCOVERY_RETRY_MS);
+        memset(&candidate, 0, sizeof(candidate));
+        if (bluetooth_state == DS5_BT_STATE_DISCOVERING) {
+            ds5_bt_set_state(DS5_BT_STATE_IDLE);
+        }
+        return;
+    }
+
+    discovery_stop_requested = false;
+    discovery_retry_at = now + pdMS_TO_TICKS(100U);
+    printf("DS5 BT: discovery stop failed (err %d)\r\n", err);
+}
+
+static void ds5_bt_policy_handle_timeout(TickType_t now)
+{
+    ds5_bt_state_t state = bluetooth_state;
+
+    if (!ds5_bt_deadline_expired(now, link_deadline)) {
+        return;
+    }
+
+    printf("DS5 BT: %s phase timed out\r\n", ds5_bt_state_name(state));
+    if (active_connection != NULL) {
+        if (state != DS5_BT_STATE_DISCONNECTING) {
+            (void)ds5_bt_disconnect_active(BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        } else {
+            bool bonded_link = active_peer_is_bonded;
+
+            /* Do not leave a dead ACL pointer blocking every future link. */
+            (void)bt_conn_disconnect(active_connection,
+                                     BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+            ds5_bt_reset_link_state();
+            ds5_bt_recover_after_link(bonded_link);
+        }
+    } else {
+        ds5_bt_reset_link_state();
+        ds5_bt_recover_after_link(false);
+    }
+}
+
+static void ds5_bt_policy_step(void)
+{
+    TickType_t now = xTaskGetTickCount();
+
+    ds5_bt_policy_handle_timeout(now);
+    ds5_bt_process_bond_recovery(now);
+
+    if (pairing_window_active &&
+        ds5_bt_deadline_expired(now, pairing_window_deadline)) {
+        pairing_window_active = false;
+        discovery_allowed = false;
+    }
+
+    ds5_bt_stop_discovery_if_needed(now);
+
+    if ((active_connection != NULL) ||
+        (bluetooth_state == DS5_BT_STATE_SECURING) ||
+        (bluetooth_state == DS5_BT_STATE_L2CAP_CONNECTING) ||
+        (bluetooth_state == DS5_BT_STATE_READY) ||
+        (bluetooth_state == DS5_BT_STATE_DISCONNECTING) ||
+        (bluetooth_state == DS5_BT_STATE_ACL_CONNECTING)) {
+        return;
+    }
+
+    if ((bluetooth_state == DS5_BT_STATE_CANDIDATE_READY) &&
+        candidate.valid && ds5_bt_deadline_expired(now, candidate_retry_at)) {
+        if (ds5_bt_connect_candidate() != 0) {
+            candidate_retry_at = now + pdMS_TO_TICKS(1000U);
+        }
+        return;
+    }
+
+    if ((bluetooth_state == DS5_BT_STATE_IDLE) && discovery_allowed &&
+        !discovery_in_flight &&
+        ds5_bt_deadline_expired(now, discovery_retry_at)) {
+        (void)ds5_bt_start_discovery_internal();
+    }
+}
+
+static TickType_t ds5_bt_policy_wait_ticks(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    TickType_t wait_ticks = portMAX_DELAY;
+    TickType_t candidate_wait;
+    TickType_t discovery_wait;
+    TickType_t window_wait;
+    TickType_t link_wait;
+    TickType_t bond_wait;
+
+    link_wait = ds5_bt_ticks_until(now, link_deadline);
+    if (link_wait < wait_ticks) {
+        wait_ticks = link_wait;
+    }
+
+    window_wait = pairing_window_active ?
+        ds5_bt_ticks_until(now, pairing_window_deadline) : portMAX_DELAY;
+    if (window_wait < wait_ticks) {
+        wait_ticks = window_wait;
+    }
+
+    discovery_wait = ((bluetooth_state == DS5_BT_STATE_IDLE) &&
+                      discovery_allowed && !discovery_in_flight) ?
+        ds5_bt_ticks_until(now, discovery_retry_at) : portMAX_DELAY;
+    if (discovery_in_flight && !discovery_allowed &&
+        !discovery_stop_requested) {
+        discovery_wait = ds5_bt_ticks_until(now, discovery_retry_at);
+    }
+    if (discovery_wait < wait_ticks) {
+        wait_ticks = discovery_wait;
+    }
+
+    candidate_wait = (bluetooth_state == DS5_BT_STATE_CANDIDATE_READY) ?
+        ds5_bt_ticks_until(now, candidate_retry_at) : portMAX_DELAY;
+    if (candidate_wait < wait_ticks) {
+        wait_ticks = candidate_wait;
+    }
+
+    bond_wait = bond_recovery_pending ?
+        ds5_bt_ticks_until(now, bond_recovery_retry_at) : portMAX_DELAY;
+    if (bond_wait < wait_ticks) {
+        wait_ticks = bond_wait;
+    }
+
+    return wait_ticks;
+}
+
+static void ds5_bt_policy_worker(void *parameter)
+{
+    (void)parameter;
+
+    while (1) {
+        ds5_bt_policy_step();
+        (void)ulTaskNotifyTake(pdTRUE, ds5_bt_policy_wait_ticks());
+    }
+}
+
 static int ds5_bt_start_worker(void)
 {
-    if ((worker_task != NULL) && (tx_worker_task != NULL)) {
+    if ((worker_task != NULL) && (tx_worker_task != NULL) &&
+        (policy_task != NULL)) {
         return 0;
     }
 
@@ -1285,12 +1826,24 @@ static int ds5_bt_start_worker(void)
         }
     }
 
-    tx_worker_task = xTaskCreateStatic(ds5_bt_tx_worker, "ds5_bt_tx",
-                                       DS5_BT_TX_WORKER_STACK_DEPTH, NULL,
-                                       configMAX_PRIORITIES - 5U,
-                                       tx_worker_task_stack,
-                                       &tx_worker_task_storage);
-    return tx_worker_task != NULL ? 0 : -ENOMEM;
+    if (tx_worker_task == NULL) {
+        tx_worker_task = xTaskCreateStatic(ds5_bt_tx_worker, "ds5_bt_tx",
+                                           DS5_BT_TX_WORKER_STACK_DEPTH, NULL,
+                                           configMAX_PRIORITIES - 5U,
+                                           tx_worker_task_stack,
+                                           &tx_worker_task_storage);
+        if (tx_worker_task == NULL) {
+            return -ENOMEM;
+        }
+    }
+
+    if (policy_task == NULL) {
+        policy_task = xTaskCreateStatic(
+            ds5_bt_policy_worker, "ds5_bt_policy", DS5_BT_POLICY_STACK_DEPTH,
+            NULL, configMAX_PRIORITIES - 5U, policy_task_stack,
+            &policy_task_storage);
+    }
+    return policy_task != NULL ? 0 : -ENOMEM;
 }
 
 static void ds5_bt_ready(int err)
@@ -1329,11 +1882,14 @@ static void ds5_bt_ready(int err)
 
     /* bt_enable() has already restored BR link keys before this callback. */
     memset(&candidate, 0, sizeof(candidate));
+    bonded_peer_valid = false;
+    bond_recovery_pending = false;
+    bond_recovery_retry_at = 0U;
     bt_br_foreach_bond(ds5_bt_restore_bond, &bond_count);
-    if (candidate.valid) {
+    if (bonded_peer_valid) {
         char address[BT_ADDR_STR_LEN];
 
-        bt_addr_to_str(&candidate.address, address, sizeof(address));
+        bt_addr_to_str(&bonded_peer_address, address, sizeof(address));
         printf("DS5 BT: restored saved BR/EDR peer %s "
                "(%u bond(s) stored)\r\n",
                address, (unsigned int)bond_count);
@@ -1342,27 +1898,18 @@ static void ds5_bt_ready(int err)
                    "peer\r\n");
         }
 
-        err = bt_br_set_connectable(true);
-        if (err != 0) {
-            printf("DS5 BT: connectable enable failed (err %d)\r\n", err);
-        }
-
-        /*
-         * A DualSense started with the PS button pages its saved host. Keep
-         * page scan enabled and accept that incoming ACL instead of repeatedly
-         * paging the controller at the same time.
-         */
-        ds5_bt_set_state(DS5_BT_STATE_RECONNECT_WAIT);
-        return;
+        ds5_bt_enable_bonded_page_scan();
+    } else {
+        printf("DS5 BT: no saved BR/EDR peer\r\n");
     }
 
-    printf("DS5 BT: no saved BR/EDR peer\r\n");
+    /*
+     * Passive page scan for the bonded peer and active inquiry for a new
+     * controller are independent procedures.  Start the pairing window
+     * immediately; it must not delay reconnection of the bonded peer.
+     */
     ds5_bt_set_state(DS5_BT_STATE_IDLE);
-    err = ds5_bt_start_discovery();
-    if (err != 0) {
-        printf("DS5 BT: initial discovery start failed (err %d)\r\n", err);
-        return;
-    }
+    ds5_bt_open_pairing_window();
 }
 
 int ds5_bt_init(void)
@@ -1394,24 +1941,14 @@ int ds5_bt_init(void)
 
 int ds5_bt_start_discovery(void)
 {
-    int err;
-
-    if (bluetooth_state != DS5_BT_STATE_IDLE) {
+    if ((bluetooth_state == DS5_BT_STATE_OFF) ||
+        (active_connection != NULL) ||
+        (bluetooth_state != DS5_BT_STATE_IDLE)) {
         return -EBUSY;
     }
 
-    ds5_bt_set_state(DS5_BT_STATE_DISCOVERING);
-    err = bt_br_discovery_start(&discovery_param, discovery_results,
-                                DS5_BT_DISCOVERY_RESULT_COUNT,
-                                ds5_bt_discovery_complete);
-    if (err != 0) {
-        printf("DS5 BT: discovery start failed (err %d)\r\n", err);
-        ds5_bt_set_state(DS5_BT_STATE_IDLE);
-        return err;
-    }
-
-    printf("DS5 BT: BR/EDR discovery started\r\n");
-    return 0;
+    ds5_bt_open_pairing_window();
+    return ds5_bt_start_discovery_internal();
 }
 
 bool ds5_bt_candidate_available(void)
@@ -1421,12 +1958,16 @@ bool ds5_bt_candidate_available(void)
 
 int ds5_bt_fallback_to_discovery(void)
 {
-    if (bluetooth_state != DS5_BT_STATE_RECONNECT_WAIT) {
+    printf("DS5 BT: active pairing discovery requested\r\n");
+    if (bluetooth_state == DS5_BT_STATE_OFF) {
+        return -EAGAIN;
+    }
+    if (active_connection != NULL) {
         return -EBUSY;
     }
-
-    printf("DS5 BT: reconnect wait timed out; switching to discovery\r\n");
-    ds5_bt_set_state(DS5_BT_STATE_IDLE);
+    if (bluetooth_state != DS5_BT_STATE_IDLE) {
+        return -EBUSY;
+    }
     return ds5_bt_start_discovery();
 }
 
@@ -1446,15 +1987,62 @@ int ds5_bt_connect_candidate(void)
         return -EBUSY;
     }
 
+    bt_addr_copy(&outgoing_target_address, &candidate.address);
+    outgoing_create_pending = true;
     ds5_bt_set_state(DS5_BT_STATE_ACL_CONNECTING);
     conn = bt_conn_create_br(&candidate.address, &connection_param);
     if (conn == NULL) {
-        ds5_bt_return_to_candidate();
+        outgoing_create_pending = false;
+        if (active_connection != NULL) {
+            /* A saved peer may have arrived while create_br was pending. */
+            ds5_bt_close_pairing_window();
+            return 0;
+        }
+
+        memset(&candidate, 0, sizeof(candidate));
+        ds5_bt_set_state(DS5_BT_STATE_IDLE);
+        ds5_bt_open_pairing_window();
         return -EIO;
     }
 
-    active_connection = conn;
-    outgoing_acl = true;
+    if ((active_connection != NULL) && (active_connection != conn)) {
+        printf("DS5 BT: discarding outgoing ACL; another peer is active\r\n");
+        outgoing_create_pending = false;
+        (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        return -EBUSY;
+    }
+
+    /* The callback can claim the same connection before create_br returns. */
+    if (active_connection == conn) {
+        outgoing_create_pending = false;
+        return 0;
+    }
+
+    /* A terminal callback may have completed while create_br was returning.
+     * Its recovery path already dealt with the connection object. */
+    if (!outgoing_create_pending) {
+        return -EIO;
+    }
+
+    if (!candidate.valid || (bluetooth_state != DS5_BT_STATE_ACL_CONNECTING)) {
+        outgoing_create_pending = false;
+        (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        return -EIO;
+    }
+
+    if (!ds5_bt_claim_active_connection(
+            conn, true, ds5_bt_connection_matches_saved_peer(conn), true)) {
+        outgoing_create_pending = false;
+        if (active_connection != NULL) {
+            (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+            return -EBUSY;
+        }
+        return -EIO;
+    }
+
+    outgoing_create_pending = false;
+    memset(&candidate, 0, sizeof(candidate));
+    ds5_bt_close_pairing_window();
     return 0;
 }
 
@@ -1466,7 +2054,6 @@ int ds5_bt_disconnect(void)
 int ds5_bt_clear_pairing(void)
 {
     ds5_bt_candidate_t previous_candidate;
-    int connectable_err;
     int err;
 
     if (bluetooth_state == DS5_BT_STATE_OFF) {
@@ -1488,18 +2075,20 @@ int ds5_bt_clear_pairing(void)
         return err;
     }
 
+    bonded_peer_valid = false;
+    bond_recovery_pending = false;
+    bond_recovery_retry_at = 0U;
+
     ds5_feature_cache_clear();
 
-    connectable_err = bt_br_set_connectable(false);
-    if (connectable_err != 0) {
-        printf("DS5 BT: connectable disable failed after unpair (err %d)\r\n",
-               connectable_err);
-    }
+    ds5_bt_disable_page_scan();
+    ds5_bt_close_pairing_window();
 
     if (active_connection != NULL) {
         ds5_bt_set_state(DS5_BT_STATE_DISCONNECTING);
     } else {
         ds5_bt_set_state(DS5_BT_STATE_IDLE);
+        ds5_bt_open_pairing_window();
     }
 
     printf("DS5 BT: all pairing information cleared\r\n");
@@ -1525,6 +2114,10 @@ void ds5_bt_get_diagnostics(ds5_bt_diagnostics_t *diagnostics)
     diagnostics->state = bluetooth_state;
     diagnostics->control_channel_ready = control_channel_ready;
     diagnostics->interrupt_channel_ready = interrupt_channel_ready;
+    diagnostics->bonded_peer_valid = bonded_peer_valid;
+    diagnostics->discovery_active = discovery_in_flight;
+    diagnostics->pairing_window_active = pairing_window_active;
+    diagnostics->link_generation = link_generation;
     diagnostics->worker_task_stack_high_water_words =
         ds5_bt_stack_high_water_words(worker_task);
     diagnostics->tx_worker_task_stack_high_water_words =

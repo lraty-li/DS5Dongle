@@ -21,7 +21,8 @@
 
 #include "ds5_protocol.h"
 
-#define DS5_L2CAP_EVENT_QUEUE_LENGTH 8U
+#define DS5_L2CAP_EVENT_QUEUE_LENGTH 16U
+#define DS5_L2CAP_RESERVED_LIFECYCLE_EVENTS 4U
 #define DS5_L2CAP_COMPLETION_SAMPLE_INTERVAL 8U
 #define DS5_L2CAP_COMPLETION_SAMPLE_SLOTS    4U
 
@@ -43,6 +44,10 @@ static QueueHandle_t event_queue;
 static ds5_l2cap_init_state_t init_state;
 static bool outgoing_channel_sequence;
 static volatile uint32_t dropped_event_count;
+static struct bt_conn *session_conn;
+static uint32_t session_id;
+static struct bt_conn *channel_connections[2];
+static uint32_t channel_sessions[2];
 
 typedef struct {
     volatile bool pending;
@@ -205,6 +210,8 @@ static struct bt_l2cap_br_chan *ds5_l2cap_get_channel(
 
 static void ds5_l2cap_enqueue_event(ds5_l2cap_event_type_t type,
                                     ds5_l2cap_channel_t channel,
+                                    struct bt_conn *conn,
+                                    uint32_t session,
                                     int status,
                                     const uint8_t *data,
                                     size_t length)
@@ -212,6 +219,8 @@ static void ds5_l2cap_enqueue_event(ds5_l2cap_event_type_t type,
     ds5_l2cap_event_t event = {
         .type = type,
         .channel = channel,
+        .conn = conn,
+        .session = session,
         .status = status,
         .length = length,
     };
@@ -227,7 +236,18 @@ static void ds5_l2cap_enqueue_event(ds5_l2cap_event_type_t type,
         memcpy(event.data, data, length);
     }
 
-    if (xQueueSend(event_queue, &event, 0U) != pdPASS) {
+    /* Keep lifecycle events deliverable even while audio data is queued. */
+    if ((type == DS5_L2CAP_EVENT_DATA) &&
+         (uxQueueMessagesWaiting(event_queue) >=
+          (DS5_L2CAP_EVENT_QUEUE_LENGTH -
+           DS5_L2CAP_RESERVED_LIFECYCLE_EVENTS))) {
+        ++dropped_event_count;
+        return;
+    }
+
+    if (((type == DS5_L2CAP_EVENT_DATA) ?
+             xQueueSend(event_queue, &event, 0U) :
+             xQueueSendToFront(event_queue, &event, 0U)) != pdPASS) {
         ++dropped_event_count;
     }
 }
@@ -235,21 +255,31 @@ static void ds5_l2cap_enqueue_event(ds5_l2cap_event_type_t type,
 static void ds5_l2cap_connected(struct bt_l2cap_chan *channel)
 {
     ds5_l2cap_channel_t channel_id = ds5_l2cap_channel_id(channel);
+    struct bt_conn *conn = channel_connections[channel_id];
+    uint32_t channel_session = channel_sessions[channel_id];
 
-    ds5_l2cap_enqueue_event(DS5_L2CAP_EVENT_CONNECTED, channel_id, 0,
-                            NULL, 0U);
+    ds5_l2cap_enqueue_event(DS5_L2CAP_EVENT_CONNECTED, channel_id, conn,
+                            channel_session, 0, NULL, 0U);
 
     if ((channel_id == DS5_L2CAP_CHANNEL_CONTROL) &&
         outgoing_channel_sequence &&
         (interrupt_channel.chan.conn == NULL)) {
+        channel_connections[DS5_L2CAP_CHANNEL_INTERRUPT] = channel->conn;
+        channel_sessions[DS5_L2CAP_CHANNEL_INTERRUPT] = channel_session;
         int err = bt_l2cap_chan_connect(channel->conn,
                                         &interrupt_channel.chan,
                                         DS5_HID_INTERRUPT_PSM);
 
         if (err != 0) {
             outgoing_channel_sequence = false;
+            /* bt_l2cap_chan_connect() may fail before the stack installs the
+             * channel, so no disconnected callback is guaranteed to clear
+             * this metadata later. */
+            channel_connections[DS5_L2CAP_CHANNEL_INTERRUPT] = NULL;
+            channel_sessions[DS5_L2CAP_CHANNEL_INTERRUPT] = 0U;
             ds5_l2cap_enqueue_event(DS5_L2CAP_EVENT_ERROR,
                                     DS5_L2CAP_CHANNEL_INTERRUPT,
+                                    channel->conn, channel_session,
                                     err, NULL, 0U);
         }
     } else if (channel_id == DS5_L2CAP_CHANNEL_INTERRUPT) {
@@ -261,6 +291,8 @@ static void ds5_l2cap_connected(struct bt_l2cap_chan *channel)
 static void ds5_l2cap_disconnected(struct bt_l2cap_chan *channel)
 {
     ds5_l2cap_channel_t channel_id = ds5_l2cap_channel_id(channel);
+    struct bt_conn *conn = channel_connections[channel_id];
+    uint32_t channel_session = channel_sessions[channel_id];
 
     if (channel_id == DS5_L2CAP_CHANNEL_CONTROL) {
         outgoing_channel_sequence = false;
@@ -268,20 +300,26 @@ static void ds5_l2cap_disconnected(struct bt_l2cap_chan *channel)
         last_audio_submit_us = 0U;
     }
 
-    ds5_l2cap_enqueue_event(DS5_L2CAP_EVENT_DISCONNECTED, channel_id, 0,
-                            NULL, 0U);
+    ds5_l2cap_enqueue_event(DS5_L2CAP_EVENT_DISCONNECTED, channel_id, conn,
+                            channel_session, 0, NULL, 0U);
+    channel_connections[channel_id] = NULL;
+    channel_sessions[channel_id] = 0U;
 }
 
 static int ds5_l2cap_recv(struct bt_l2cap_chan *channel,
                           struct net_buf *buffer)
 {
+    ds5_l2cap_channel_t channel_id;
+
     if (buffer == NULL) {
         return -EINVAL;
     }
 
+    channel_id = ds5_l2cap_channel_id(channel);
     ds5_l2cap_enqueue_event(DS5_L2CAP_EVENT_DATA,
-                            ds5_l2cap_channel_id(channel), 0,
-                            buffer->data, buffer->len);
+                            channel_id, channel_connections[channel_id],
+                            channel_sessions[channel_id], 0, buffer->data,
+                            buffer->len);
 
     /* The local BR/EDR receive path releases buffer after this callback. */
     return 0;
@@ -304,6 +342,9 @@ static int ds5_l2cap_accept_control(struct bt_conn *conn,
     }
 
     outgoing_channel_sequence = false;
+    channel_connections[DS5_L2CAP_CHANNEL_CONTROL] = conn;
+    channel_sessions[DS5_L2CAP_CHANNEL_CONTROL] =
+        session_conn == conn ? session_id : 0U;
     *channel = &control_channel.chan;
     return 0;
 }
@@ -318,6 +359,9 @@ static int ds5_l2cap_accept_interrupt(struct bt_conn *conn,
         return -ENOMEM;
     }
 
+    channel_connections[DS5_L2CAP_CHANNEL_INTERRUPT] = conn;
+    channel_sessions[DS5_L2CAP_CHANNEL_INTERRUPT] =
+        session_conn == conn ? session_id : 0U;
     *channel = &interrupt_channel.chan;
     return 0;
 }
@@ -351,6 +395,10 @@ int ds5_l2cap_init(void)
     }
 
     if (init_state == DS5_L2CAP_INIT_NONE) {
+        session_conn = NULL;
+        session_id = 0U;
+        memset(channel_connections, 0, sizeof(channel_connections));
+        memset(channel_sessions, 0, sizeof(channel_sessions));
         memset(completion_samples, 0, sizeof(completion_samples));
         audio_send_attempts = 0U;
         audio_send_accepted = 0U;
@@ -399,6 +447,20 @@ int ds5_l2cap_init(void)
     return 0;
 }
 
+void ds5_l2cap_set_session(struct bt_conn *conn, uint32_t session)
+{
+    session_conn = conn;
+    session_id = session;
+}
+
+void ds5_l2cap_clear_session(struct bt_conn *conn)
+{
+    if (session_conn == conn) {
+        session_conn = NULL;
+        session_id = 0U;
+    }
+}
+
 int ds5_l2cap_connect(struct bt_conn *conn)
 {
     int err;
@@ -416,11 +478,16 @@ int ds5_l2cap_connect(struct bt_conn *conn)
         return -EBUSY;
     }
 
+    channel_connections[DS5_L2CAP_CHANNEL_CONTROL] = conn;
+    channel_sessions[DS5_L2CAP_CHANNEL_CONTROL] =
+        session_conn == conn ? session_id : 0U;
     outgoing_channel_sequence = true;
     err = bt_l2cap_chan_connect(conn, &control_channel.chan,
                                 DS5_HID_CONTROL_PSM);
     if (err != 0) {
         outgoing_channel_sequence = false;
+        channel_connections[DS5_L2CAP_CHANNEL_CONTROL] = NULL;
+        channel_sessions[DS5_L2CAP_CHANNEL_CONTROL] = 0U;
     }
 
     return err;

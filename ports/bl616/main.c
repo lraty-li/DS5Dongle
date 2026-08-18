@@ -16,9 +16,6 @@
 #include "ds5_usb_log.h"
 
 #define DS5_BT_STATE_POLL_MS       50U
-#define DS5_BT_DISCOVERY_RETRY_MS  750U
-#define DS5_BT_CONNECTION_RETRY_MS 1000U
-#define DS5_BT_RECONNECT_TIMEOUT_MS 20000U
 
 /* Stop the MCU core while the scheduler has no ready application task. */
 void vApplicationIdleHook(void)
@@ -29,8 +26,6 @@ void vApplicationIdleHook(void)
 static void app_start_task(void *parameter)
 {
     ds5_bt_state_t bluetooth_state;
-    ds5_bt_state_t previous_state = DS5_BT_STATE_OFF;
-    TickType_t reconnect_wait_since = 0U;
     bool usb_initialized = false;
     bool usb_active = false;
     int err;
@@ -75,68 +70,6 @@ static void app_start_task(void *parameter)
                                    usb_active ? "connected" : "disconnected");
                 }
             }
-        }
-
-        /* Restart the passive-reconnect timer every time we enter wait. */
-        if (bluetooth_state != previous_state) {
-            if (bluetooth_state == DS5_BT_STATE_RECONNECT_WAIT) {
-                reconnect_wait_since = xTaskGetTickCount();
-            }
-            previous_state = bluetooth_state;
-        }
-
-        /*
-         * RECONNECT_WAIT is passive: it waits for the controller to page
-         * this dongle (PS button).  If the controller's saved host is gone
-         * or invalid, nothing will ever page us, so time out and fall back
-         * to active discovery + connection (keeps the existing bond).
-         */
-        if ((bluetooth_state == DS5_BT_STATE_RECONNECT_WAIT) &&
-            (xTaskGetTickCount() - reconnect_wait_since) >=
-                pdMS_TO_TICKS(DS5_BT_RECONNECT_TIMEOUT_MS)) {
-            ds5_log_printf("DS5: reconnect wait timed out; "
-                           "falling back to discovery\r\n");
-            (void)ds5_bt_fallback_to_discovery();
-        }
-
-        if (bluetooth_state == DS5_BT_STATE_CANDIDATE_READY) {
-            err = ds5_bt_connect_candidate();
-            if (err != 0) {
-                ds5_log_printf(
-                    "DS5: candidate ACL connection failed to start "
-                    "(err %d)\r\n",
-                    err);
-                vTaskDelay(pdMS_TO_TICKS(DS5_BT_CONNECTION_RETRY_MS));
-            } else {
-                ds5_log_printf("DS5: candidate ACL connection started\r\n");
-            }
-            continue;
-        }
-
-        if (bluetooth_state == DS5_BT_STATE_RECONNECT_WAIT) {
-            vTaskDelay(pdMS_TO_TICKS(DS5_BT_STATE_POLL_MS));
-            continue;
-        }
-
-        if (bluetooth_state == DS5_BT_STATE_IDLE) {
-            ds5_log_printf("DS5: no candidate; discovery will retry\r\n");
-
-            /*
-             * The pinned SDK clears its discovery callback/result pointers
-             * immediately after the completion callback returns. Delay the
-             * restart so it cannot overwrite that cleanup in hci_core.c.
-             */
-            vTaskDelay(pdMS_TO_TICKS(DS5_BT_DISCOVERY_RETRY_MS));
-            if (ds5_bt_get_state() != DS5_BT_STATE_IDLE) {
-                continue;
-            }
-
-            err = ds5_bt_start_discovery();
-            if (err != 0) {
-                ds5_log_printf("DS5: discovery retry failed (err %d)\r\n",
-                               err);
-            }
-            continue;
         }
 
         vTaskDelay(pdMS_TO_TICKS(DS5_BT_STATE_POLL_MS));

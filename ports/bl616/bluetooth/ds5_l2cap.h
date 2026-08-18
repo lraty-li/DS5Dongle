@@ -53,6 +53,8 @@ typedef enum {
 typedef struct {
     ds5_l2cap_event_type_t type;
     ds5_l2cap_channel_t channel;
+    struct bt_conn *conn;
+    uint32_t session;
     int status;
     size_t length;
     uint8_t data[DS5_L2CAP_MAX_EVENT_PAYLOAD];
@@ -60,6 +62,10 @@ typedef struct {
 
 /* Register the BR/EDR HID servers. Call only after bt_enable is ready. */
 int ds5_l2cap_init(void);
+
+/* Associate future channel callbacks with the current ACL session. */
+void ds5_l2cap_set_session(struct bt_conn *conn, uint32_t session);
+void ds5_l2cap_clear_session(struct bt_conn *conn);
 
 /* Start the Control channel; Interrupt follows after Control is connected. */
 int ds5_l2cap_connect(struct bt_conn *conn);
