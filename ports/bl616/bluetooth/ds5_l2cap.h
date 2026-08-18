@@ -72,6 +72,12 @@ int ds5_l2cap_connect(struct bt_conn *conn);
 int ds5_l2cap_disconnect(void);
 
 /*
+ * Force local channel teardown after a BR/EDR ACL has already terminated.
+ * A non-NULL conn limits cleanup to that ACL; NULL explicitly means all.
+ */
+void ds5_l2cap_abort_connection(struct bt_conn *conn);
+
+/*
  * Allocate and send from task context. The SDK takes ownership of its net_buf
  * only after bt_l2cap_chan_send accepts the packet. Returns a non-negative
  * byte count on success, matching the pinned SDK, or a negative error code.

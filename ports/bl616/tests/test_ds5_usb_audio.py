@@ -13,6 +13,21 @@ HID_HEADER = BL616_DIR / "usb" / "ds5_usb_hid.h"
 AUDIO_MAILBOX = BL616_DIR / "platform" / "ds5_audio_mailbox.c"
 HAPTICS_MAILBOX = BL616_DIR / "platform" / "ds5_haptics_mailbox.c"
 BT_SOURCE = BL616_DIR / "bluetooth" / "ds5_bt.c"
+BT_SOURCE_PATHS = (
+    BL616_DIR / "bluetooth" / "ds5_bt_link.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_discovery.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_l2cap_worker.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_tx.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_policy.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_init.c",
+    BL616_DIR / "bluetooth" / "ds5_bt.c",
+)
+
+
+def read_bt_sources():
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in BT_SOURCE_PATHS
+    )
 L2CAP_HEADER = BL616_DIR / "bluetooth" / "ds5_l2cap.h"
 CMAKE_PATH = BL616_DIR / "CMakeLists.txt"
 DEFCONFIG_PATH = BL616_DIR / "defconfig"
@@ -134,9 +149,10 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("xQueueCreateStatic", haptics_source)
 
     def test_bluetooth_uses_native_audio_and_microphone_contract(self):
-        source = BT_SOURCE.read_text(encoding="utf-8")
+        source = read_bt_sources()
 
-        self.assertEqual(source.count("static ds5_output_sequence_t output_sequence"), 1)
+        self.assertEqual(source.count("ds5_output_sequence_t output_sequence"), 1)
+        self.assertIn("ds5_output_sequence_reset(&output_sequence, 0U)", source)
         self.assertIn("ds5_build_bt_audio_transaction", source)
         self.assertIn("ds5_build_bt_microphone_status_transaction", source)
         self.assertIn("(event->data[2] & 0x02U)", source)
@@ -145,12 +161,13 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("DS5_BT_AUDIO_SPEAKER_FRAME_COUNT", source)
 
     def test_bluetooth_drops_stale_audio_but_retries_latest_state(self):
-        source = BT_SOURCE.read_text(encoding="utf-8")
+        source = read_bt_sources()
 
-        self.assertIn("static void ds5_bt_forward_audio(", source)
+        self.assertIn("static bool ds5_bt_forward_audio(", source)
         self.assertIn("static bool ds5_bt_forward_usb_output(", source)
-        self.assertNotIn("if (ds5_bt_forward_audio(", source)
+        self.assertIn("if (ds5_bt_forward_audio(", source)
         self.assertIn("if (ds5_bt_forward_usb_output(", source)
+        self.assertIn("retry_pending = true;", source)
         self.assertIn("pending_haptics = false;", source)
         self.assertNotIn("DS5_BT_DEFAULT_SPEAKER_PREGAIN", source)
 
@@ -252,7 +269,7 @@ class Ds5UsbAudioTests(unittest.TestCase):
 
     def test_realtime_tasks_do_not_format_periodic_status_logs(self):
         audio = AUDIO_SOURCE.read_text(encoding="utf-8")
-        bluetooth = BT_SOURCE.read_text(encoding="utf-8")
+        bluetooth = read_bt_sources()
 
         self.assertNotIn("DS5_USB_AUDIO_LOG_INTERVAL", audio)
         self.assertNotIn("observed_packets %", audio)

@@ -14,6 +14,21 @@ OUTPUT_MAILBOX_SOURCE = BL616_DIR / "platform" / "ds5_output_mailbox.c"
 FEATURE_SET_MAILBOX_SOURCE = BL616_DIR / "platform" / "ds5_feature_set_mailbox.c"
 FEATURE_CACHE_SOURCE = BL616_DIR / "ds5" / "ds5_feature_cache.c"
 BT_SOURCE = BL616_DIR / "bluetooth" / "ds5_bt.c"
+BT_SOURCE_PATHS = (
+    BL616_DIR / "bluetooth" / "ds5_bt_link.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_discovery.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_l2cap_worker.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_tx.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_policy.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_init.c",
+    BL616_DIR / "bluetooth" / "ds5_bt.c",
+)
+
+
+def read_bt_sources():
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in BT_SOURCE_PATHS
+    )
 ORIGINAL_DESCRIPTOR_SOURCE = REPO_ROOT / "src" / "usb_descriptors.cpp"
 
 
@@ -238,7 +253,7 @@ class Ds5UsbHidTests(unittest.TestCase):
         self.assertIn("entry->length[bank] = length + 1U;", source)
 
     def test_bluetooth_publishes_only_validated_payload(self):
-        source = BT_SOURCE.read_text(encoding="utf-8")
+        source = read_bt_sources()
         valid_start = source.index("if (protocol_result == DS5_PROTOCOL_OK)")
         valid_end = source.index("} else {", valid_start)
 
@@ -247,7 +262,7 @@ class Ds5UsbHidTests(unittest.TestCase):
         )
 
     def test_bluetooth_toggles_microphone_only_on_button_rising_edge(self):
-        source = BT_SOURCE.read_text(encoding="utf-8")
+        source = read_bt_sources()
 
         self.assertIn("pressed && !microphone_button_pressed", source)
         self.assertIn(

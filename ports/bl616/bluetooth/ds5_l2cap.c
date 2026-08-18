@@ -455,7 +455,7 @@ void ds5_l2cap_set_session(struct bt_conn *conn, uint32_t session)
 
 void ds5_l2cap_clear_session(struct bt_conn *conn)
 {
-    if (session_conn == conn) {
+    if ((conn == NULL) || (session_conn == conn)) {
         session_conn = NULL;
         session_id = 0U;
     }
@@ -520,6 +520,57 @@ int ds5_l2cap_disconnect(void)
     }
 
     return first_error;
+}
+
+static bool ds5_l2cap_abort_channel(struct bt_l2cap_br_chan *channel,
+                                    ds5_l2cap_channel_t channel_id,
+                                    struct bt_conn *terminated_connection)
+{
+    struct bt_conn *channel_connection = channel->chan.conn;
+
+    if (channel_connection != NULL) {
+        if ((terminated_connection != NULL) &&
+            (channel_connection != terminated_connection)) {
+            /* Never let an old ACL callback delete a channel of a new ACL. */
+            return false;
+        }
+
+        /* A known live object can still be removed from the SDK channel list. */
+        bt_l2cap_chan_remove(channel_connection, &channel->chan);
+
+        /* This invokes the application disconnected callback and clears conn. */
+        bt_l2cap_chan_del(&channel->chan);
+    } else if ((terminated_connection != NULL) &&
+               (channel_connections[channel_id] != terminated_connection)) {
+        /* The stack may have detached the channel before the ACL callback. */
+        return false;
+    }
+
+    if ((terminated_connection == NULL) ||
+        (channel_connections[channel_id] == terminated_connection)) {
+        channel_connections[channel_id] = NULL;
+        channel_sessions[channel_id] = 0U;
+    }
+
+    return true;
+}
+
+void ds5_l2cap_abort_connection(struct bt_conn *conn)
+{
+    bool control_aborted;
+    bool interrupt_aborted;
+
+    control_aborted = ds5_l2cap_abort_channel(
+        &control_channel, DS5_L2CAP_CHANNEL_CONTROL, conn);
+    interrupt_aborted = ds5_l2cap_abort_channel(
+        &interrupt_channel, DS5_L2CAP_CHANNEL_INTERRUPT, conn);
+
+    if (control_aborted || interrupt_aborted) {
+        outgoing_channel_sequence = false;
+    }
+    if (interrupt_aborted) {
+        last_audio_submit_us = 0U;
+    }
 }
 
 int ds5_l2cap_send(ds5_l2cap_channel_t channel, const uint8_t *data,

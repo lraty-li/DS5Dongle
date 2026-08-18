@@ -128,7 +128,12 @@ sdk_add_include_directories(
 
 target_sources(app PRIVATE
     bluetooth/ds5_bt.c
+    bluetooth/ds5_bt_discovery.c
+    bluetooth/ds5_bt_init.c
+    bluetooth/ds5_bt_l2cap_worker.c
+    bluetooth/ds5_bt_link.c
     bluetooth/ds5_bt_policy.c
+    bluetooth/ds5_bt_tx.c
     bluetooth/ds5_l2cap.c
     debug/ds5_log.c
     ds5/ds5_feature_cache.c
