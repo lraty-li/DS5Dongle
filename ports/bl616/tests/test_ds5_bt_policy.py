@@ -463,6 +463,19 @@ class Ds5BtPolicyTests(unittest.TestCase):
         self.assertIn("pending_usb_output = false;", source)
         self.assertIn("ds5_feature_cache_clear();", source)
 
+    def test_link_generation_discards_buffered_speaker_frames(self):
+        source = read_bt_sources()
+        start = source.index(
+            "if (observed_link_generation != link_state.link_generation)"
+        )
+        end = source.index("if (!pending_feature_set", start)
+        body = source[start:end]
+
+        self.assertIn("speaker_frame_count = 0U;", body)
+        self.assertIn(
+            "ds5_audio_mailbox_try_receive_speaker_opus(", body
+        )
+
     def test_discovery_stop_is_completed_without_waiting_for_callback(self):
         source = read_bt_sources()
         start = source.index("static void ds5_bt_stop_discovery_if_needed")

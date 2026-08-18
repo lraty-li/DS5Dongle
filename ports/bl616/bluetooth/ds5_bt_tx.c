@@ -293,6 +293,7 @@ void ds5_bt_tx_worker(void *parameter)
     uint8_t usb_report[DS5_USB_OUTPUT_REPORT_SIZE];
     uint8_t haptics_data[DS5_HAPTICS_DATA_SIZE];
     uint8_t speaker_opus_data[DS5_BT_AUDIO_SPEAKER_DATA_SIZE];
+    uint8_t discarded_speaker_frame[DS5_AUDIO_SPEAKER_OPUS_SIZE];
     uint8_t bt_transaction[DS5_BT_HAPTICS_TRANSACTION_SIZE];
     ds5_feature_set_request_t feature_set_request;
     bool pending_usb_output = false;
@@ -326,6 +327,13 @@ void ds5_bt_tx_worker(void *parameter)
             pending_microphone_state = true;
             pending_usb_output = false;
             pending_haptics = false;
+            /* Never carry real-time audio across an ACL session boundary. */
+            speaker_frame_count = 0U;
+            while (ds5_audio_mailbox_try_receive_speaker_opus(
+                discarded_speaker_frame,
+                sizeof(discarded_speaker_frame))) {
+                did_work = true;
+            }
             ds5_output_sequence_reset(&output_sequence, 0U);
             haptics_packet_counter = 0U;
             while (ds5_output_mailbox_try_receive_microphone_button_press()) {
@@ -424,8 +432,6 @@ void ds5_bt_tx_worker(void *parameter)
         }
 
         if (!ds5_audio_mailbox_speaker_stream_active()) {
-            uint8_t discarded_speaker_frame[DS5_AUDIO_SPEAKER_OPUS_SIZE];
-
             speaker_frame_count = 0U;
             while (ds5_audio_mailbox_try_receive_speaker_opus(
                 discarded_speaker_frame, sizeof(discarded_speaker_frame))) {
