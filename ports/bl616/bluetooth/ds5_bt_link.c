@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "conn.h"
+#include "conn_internal.h"
 #include "ds5_bt_internal.h"
 #include "ds5_feature_cache.h"
 #include "ds5_l2cap.h"
@@ -97,6 +98,11 @@ bool ds5_bt_claim_active_connection(struct bt_conn *conn,
     ds5_bt_lifecycle_unlock();
 
     return claimed;
+}
+
+bool ds5_bt_connection_is_host_connected(const struct bt_conn *conn)
+{
+    return (conn != NULL) && (conn->state == BT_CONN_CONNECTED);
 }
 
 static void ds5_bt_remember_bonded_peer(const struct bt_conn *conn)
