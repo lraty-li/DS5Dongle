@@ -5,7 +5,6 @@
 #include "conn.h"
 #include "ds5_bt_internal.h"
 #include "ds5_bt_policy.h"
-#include "ds5_l2cap.h"
 #include "hci_err.h"
 #include "ds5_log.h"
 
@@ -293,39 +292,6 @@ static void ds5_bt_policy_handle_timeout(TickType_t now)
     }
 }
 
-static void ds5_bt_check_ready_link(TickType_t now)
-{
-    uint32_t last_activity;
-    TickType_t timeout_ticks;
-
-    if ((bluetooth_state != DS5_BT_STATE_READY) ||
-        (active_connection == NULL)) {
-        return;
-    }
-
-    /* The SDK normally delivers ds5_bt_disconnected() for this transition.
-     * Check the host-owned state as a fallback when that callback is delayed.
-     */
-    if (!ds5_bt_connection_is_host_connected(active_connection)) {
-        bool bonded_link = active_peer_is_bonded;
-
-        printf("DS5 BT: READY link is no longer connected; recovering\r\n");
-        ds5_bt_reset_link_state();
-        ds5_bt_recover_after_link(bonded_link);
-        return;
-    }
-
-    last_activity = ds5_l2cap_last_activity_tick();
-    timeout_ticks = pdMS_TO_TICKS(DS5_BT_READY_LINK_TIMEOUT_MS);
-    if ((last_activity != 0U) &&
-        ((uint32_t)(now - (TickType_t)last_activity) >=
-         (uint32_t)timeout_ticks)) {
-        printf("DS5 BT: READY link has been idle for %u ms; disconnecting\r\n",
-               (unsigned int)DS5_BT_READY_LINK_TIMEOUT_MS);
-        (void)ds5_bt_disconnect_active(BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-    }
-}
-
 static void ds5_bt_policy_step(void)
 {
     TickType_t now = xTaskGetTickCount();
@@ -333,7 +299,6 @@ static void ds5_bt_policy_step(void)
     ds5_bt_lifecycle_lock();
 
     ds5_bt_policy_handle_timeout(now);
-    ds5_bt_check_ready_link(now);
     ds5_bt_process_bond_recovery(now);
     ds5_bt_process_page_scan_retry(now);
 
@@ -424,19 +389,6 @@ static TickType_t ds5_bt_policy_wait_ticks(void)
         ds5_bt_ticks_until(now, page_scan_retry_at) : portMAX_DELAY;
     if (page_scan_wait < wait_ticks) {
         wait_ticks = page_scan_wait;
-    }
-
-    if ((bluetooth_state == DS5_BT_STATE_READY) &&
-        (active_connection != NULL)) {
-        TickType_t ready_link_wait =
-            pdMS_TO_TICKS(DS5_BT_READY_LINK_POLL_MS);
-
-        if (ready_link_wait == 0U) {
-            ready_link_wait = 1U;
-        }
-        if (ready_link_wait < wait_ticks) {
-            wait_ticks = ready_link_wait;
-        }
     }
 
     ds5_bt_lifecycle_unlock();

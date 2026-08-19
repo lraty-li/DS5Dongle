@@ -418,32 +418,6 @@ class Ds5BtPolicyTests(unittest.TestCase):
         self.assertIn("ds5_bt_reset_link_state();", body)
         self.assertIn("ds5_bt_recover_after_link(bonded_link);", body)
 
-    def test_ready_link_has_a_liveness_fallback(self):
-        source = read_bt_sources()
-        start = source.index("static void ds5_bt_check_ready_link")
-        end = source.index("static void ds5_bt_policy_step", start)
-        body = source[start:end]
-
-        self.assertIn("ds5_bt_connection_is_host_connected", body)
-        self.assertIn("ds5_l2cap_last_activity_tick", body)
-        self.assertIn("DS5_BT_READY_LINK_TIMEOUT_MS", body)
-        self.assertIn("ds5_bt_disconnect_active", body)
-        self.assertIn("DS5_BT_READY_LINK_POLL_MS", source)
-
-    def test_l2cap_activity_is_updated_before_event_queueing(self):
-        source = (BL616_DIR / "bluetooth" / "ds5_l2cap.c").read_text(
-            encoding="utf-8"
-        )
-        start = source.index("static int ds5_l2cap_recv")
-        end = source.index("static const struct bt_l2cap_chan_ops", start)
-        body = source[start:end]
-
-        self.assertIn("last_activity_tick", body)
-        self.assertLess(
-            body.index("last_activity_tick"),
-            body.index("ds5_l2cap_enqueue_event"),
-        )
-
     def test_l2cap_events_are_bound_to_connection_session(self):
         header = (BL616_DIR / "bluetooth" / "ds5_l2cap.h").read_text(
             encoding="utf-8"

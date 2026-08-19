@@ -6,7 +6,6 @@
 #include <FreeRTOS.h>
 #include "bflb_mtimer.h"
 #include "queue.h"
-#include "task.h"
 
 #include "l2cap.h"
 #include "net/buf.h"
@@ -49,7 +48,6 @@ static struct bt_conn *session_conn;
 static uint32_t session_id;
 static struct bt_conn *channel_connections[2];
 static uint32_t channel_sessions[2];
-static volatile uint32_t last_activity_tick;
 
 typedef struct {
     volatile bool pending;
@@ -260,8 +258,6 @@ static void ds5_l2cap_connected(struct bt_l2cap_chan *channel)
     struct bt_conn *conn = channel_connections[channel_id];
     uint32_t channel_session = channel_sessions[channel_id];
 
-    last_activity_tick = (uint32_t)xTaskGetTickCount();
-
     ds5_l2cap_enqueue_event(DS5_L2CAP_EVENT_CONNECTED, channel_id, conn,
                             channel_session, 0, NULL, 0U);
 
@@ -320,9 +316,6 @@ static int ds5_l2cap_recv(struct bt_l2cap_chan *channel,
     }
 
     channel_id = ds5_l2cap_channel_id(channel);
-    if (channel_connections[channel_id] == channel->conn) {
-        last_activity_tick = (uint32_t)xTaskGetTickCount();
-    }
     ds5_l2cap_enqueue_event(DS5_L2CAP_EVENT_DATA,
                             channel_id, channel_connections[channel_id],
                             channel_sessions[channel_id], 0, buffer->data,
@@ -458,7 +451,6 @@ void ds5_l2cap_set_session(struct bt_conn *conn, uint32_t session)
 {
     session_conn = conn;
     session_id = session;
-    last_activity_tick = (uint32_t)xTaskGetTickCount();
 }
 
 void ds5_l2cap_clear_session(struct bt_conn *conn)
@@ -466,7 +458,6 @@ void ds5_l2cap_clear_session(struct bt_conn *conn)
     if ((conn == NULL) || (session_conn == conn)) {
         session_conn = NULL;
         session_id = 0U;
-        last_activity_tick = 0U;
     }
 }
 
@@ -740,11 +731,6 @@ bool ds5_l2cap_event_receive(ds5_l2cap_event_t *event)
     }
 
     return xQueueReceive(event_queue, event, portMAX_DELAY) == pdPASS;
-}
-
-uint32_t ds5_l2cap_last_activity_tick(void)
-{
-    return last_activity_tick;
 }
 
 uint32_t ds5_l2cap_dropped_event_count(void)

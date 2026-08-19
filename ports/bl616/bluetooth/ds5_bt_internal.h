@@ -28,8 +28,6 @@
 #define DS5_BT_SECURITY_TIMEOUT_MS    5000U
 #define DS5_BT_L2CAP_TIMEOUT_MS       5000U
 #define DS5_BT_DISCONNECT_TIMEOUT_MS  5000U
-#define DS5_BT_READY_LINK_TIMEOUT_MS  5000U
-#define DS5_BT_READY_LINK_POLL_MS      500U
 #define DS5_BT_PAGE_SCAN_RETRY_MS     1000U
 
 typedef struct {
@@ -122,7 +120,6 @@ void ds5_bt_set_state(ds5_bt_state_t state);
 bool ds5_bt_connection_matches_saved_peer(const struct bt_conn *conn);
 bool ds5_bt_claim_active_connection(struct bt_conn *conn, bool outgoing,
                                     bool bonded, bool persist_bond);
-bool ds5_bt_connection_is_host_connected(const struct bt_conn *conn);
 void ds5_bt_enable_bonded_page_scan(void);
 void ds5_bt_disable_page_scan(void);
 int ds5_bt_forget_bonded_peer(void);
