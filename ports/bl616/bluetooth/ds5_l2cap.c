@@ -219,7 +219,7 @@ static void ds5_l2cap_enqueue_event(ds5_l2cap_event_type_t type,
     ds5_l2cap_event_t event = {
         .type = type,
         .channel = channel,
-        .conn = conn,
+        .conn = conn == NULL ? NULL : bt_conn_ref(conn),
         .session = session,
         .status = status,
         .length = length,
@@ -229,6 +229,9 @@ static void ds5_l2cap_enqueue_event(ds5_l2cap_event_type_t type,
         (length > DS5_L2CAP_MAX_EVENT_PAYLOAD) ||
         ((data == NULL) && (length != 0U))) {
         ++dropped_event_count;
+        if (event.conn != NULL) {
+            bt_conn_unref(event.conn);
+        }
         return;
     }
 
@@ -242,6 +245,9 @@ static void ds5_l2cap_enqueue_event(ds5_l2cap_event_type_t type,
           (DS5_L2CAP_EVENT_QUEUE_LENGTH -
            DS5_L2CAP_RESERVED_LIFECYCLE_EVENTS))) {
         ++dropped_event_count;
+        if (event.conn != NULL) {
+            bt_conn_unref(event.conn);
+        }
         return;
     }
 
@@ -249,6 +255,9 @@ static void ds5_l2cap_enqueue_event(ds5_l2cap_event_type_t type,
              xQueueSend(event_queue, &event, 0U) :
              xQueueSendToFront(event_queue, &event, 0U)) != pdPASS) {
         ++dropped_event_count;
+        if (event.conn != NULL) {
+            bt_conn_unref(event.conn);
+        }
     }
 }
 

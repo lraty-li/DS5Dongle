@@ -28,6 +28,9 @@
 #define DS5_BT_SECURITY_TIMEOUT_MS    5000U
 #define DS5_BT_L2CAP_TIMEOUT_MS       5000U
 #define DS5_BT_DISCONNECT_TIMEOUT_MS  5000U
+#define DS5_BT_LINK_STATE_POLL_MS      500U
+#define DS5_BT_ACL_SUPERVISION_TIMEOUT_MS 10000U
+#define DS5_BT_ACL_SUPERVISION_TIMEOUT_SLOTS 16000U
 #define DS5_BT_PAGE_SCAN_RETRY_MS     1000U
 
 typedef struct {
@@ -114,10 +117,17 @@ void ds5_bt_lifecycle_lock(void);
 void ds5_bt_lifecycle_unlock(void);
 void ds5_bt_policy_wake(void);
 void ds5_bt_tx_wake(void);
+int ds5_bt_liveness_init(void);
+bool ds5_bt_enqueue_disconnected_event(struct bt_conn *conn,
+                                       uint8_t reason);
+void ds5_bt_process_link_events(void);
+void ds5_bt_check_link_liveness(void);
+void ds5_bt_configure_link_supervision_timeout(void);
 const char *ds5_bt_state_name(ds5_bt_state_t state);
 void ds5_bt_set_state(ds5_bt_state_t state);
 
 bool ds5_bt_connection_matches_saved_peer(const struct bt_conn *conn);
+bool ds5_bt_connection_matches_outgoing_target(const struct bt_conn *conn);
 bool ds5_bt_claim_active_connection(struct bt_conn *conn, bool outgoing,
                                     bool bonded, bool persist_bond);
 void ds5_bt_enable_bonded_page_scan(void);

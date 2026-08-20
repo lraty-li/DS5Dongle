@@ -1,5 +1,7 @@
 #include <stdio.h>
 
+#include "conn.h"
+#include "conn_internal.h"
 #include "ds5_bt_internal.h"
 #include "ds5_audio_mailbox.h"
 #include "ds5_feature_cache.h"
@@ -66,7 +68,9 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
 
     ds5_bt_lifecycle_lock();
     if ((event->conn != active_connection) ||
-        (event->session != link_generation)) {
+        (event->session != link_generation) ||
+        (event->conn == NULL) ||
+        (event->conn->state != BT_CONN_CONNECTED)) {
         goto out;
     }
 
@@ -284,6 +288,9 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
 
 out:
     ds5_bt_lifecycle_unlock();
+    if (event->conn != NULL) {
+        bt_conn_unref(event->conn);
+    }
 }
 
 void ds5_bt_worker(void *parameter)

@@ -135,6 +135,13 @@ int ds5_bt_init(void)
         }
     }
 
+    err = ds5_bt_liveness_init();
+    if (err != 0) {
+        printf("DS5 BT: liveness queue initialization failed (err %d)\r\n",
+               err);
+        return err;
+    }
+
     printf("DS5 BT: initializing controller\r\n");
     btble_controller_init(configMAX_PRIORITIES - 1U);
     printf("DS5 BT: controller initialized\r\n");

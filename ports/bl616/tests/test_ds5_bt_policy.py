@@ -11,10 +11,12 @@ BT_SOURCE_PATHS = (
     BL616_DIR / "bluetooth" / "ds5_bt_link.c",
     BL616_DIR / "bluetooth" / "ds5_bt_discovery.c",
     BL616_DIR / "bluetooth" / "ds5_bt_l2cap_worker.c",
+    BL616_DIR / "bluetooth" / "ds5_l2cap.c",
     BL616_DIR / "bluetooth" / "ds5_bt_tx.c",
     BL616_DIR / "bluetooth" / "ds5_bt_policy.c",
     BL616_DIR / "bluetooth" / "ds5_bt_init.c",
     BL616_DIR / "bluetooth" / "ds5_bt.c",
+    BL616_DIR / "bluetooth" / "ds5_bt_liveness.c",
 )
 
 
@@ -252,12 +254,16 @@ class Ds5BtPolicyTests(unittest.TestCase):
         self.assertIn("channel_connection != terminated_connection", abort_body)
         self.assertIn("Never let an old ACL callback delete a channel", abort_body)
 
-        disconnected_start = bt_source.index("static void ds5_bt_disconnected")
+        disconnected_start = bt_source.index(
+            "static void ds5_bt_process_disconnected_event"
+        )
         disconnected_end = bt_source.index(
-            "static void ds5_bt_security_changed", disconnected_start
+            "static bool ds5_bt_take_disconnect_overflow", disconnected_start
         )
         disconnected_body = bt_source[disconnected_start:disconnected_end]
-        self.assertIn("ds5_l2cap_abort_connection(conn);", disconnected_body)
+        self.assertIn(
+            "ds5_l2cap_abort_connection(event->conn);", disconnected_body
+        )
 
     def test_tx_owns_sequence_and_uses_a_protected_link_snapshot(self):
         source = read_bt_sources()
@@ -284,23 +290,19 @@ class Ds5BtPolicyTests(unittest.TestCase):
         policy_body = source[policy_start:policy_end]
         self.assertIn("ds5_bt_process_page_scan_retry(now);", policy_body)
 
-    def test_lifecycle_callbacks_and_policy_use_one_recursive_mutex(self):
+    def test_disconnection_callback_defers_recovery_out_of_hci_path(self):
         source = read_bt_sources()
 
         self.assertIn("xSemaphoreCreateRecursiveMutexStatic", source)
         self.assertIn("xSemaphoreTakeRecursive", source)
         self.assertIn("xSemaphoreGiveRecursive", source)
-        for function in (
-            "static void ds5_bt_connected",
-            "static void ds5_bt_disconnected",
-            "static void ds5_bt_security_changed",
-            "static void ds5_bt_policy_step",
-        ):
-            start = source.index(function)
-            next_function = source.find("\nstatic ", start + len(function))
-            body = source[start:] if next_function < 0 else source[start:next_function]
-            self.assertIn("ds5_bt_lifecycle_lock();", body)
-            self.assertIn("ds5_bt_lifecycle_unlock();", body)
+        start = source.index("static void ds5_bt_disconnected")
+        end = source.index("static void ds5_bt_security_changed", start)
+        body = source[start:end]
+        self.assertIn("ds5_bt_enqueue_disconnected_event", body)
+        self.assertNotIn("ds5_bt_lifecycle_lock();", body)
+        self.assertNotIn("ds5_bt_reset_link_state();", body)
+        self.assertNotIn("bt_conn_disconnect", body)
 
     def test_page_scan_restore_retries_after_a_failed_sdk_request(self):
         source = read_bt_sources()
@@ -346,8 +348,12 @@ class Ds5BtPolicyTests(unittest.TestCase):
         source = read_bt_sources()
         connected_start = source.index("static void ds5_bt_connected")
         connected_end = source.index("static void ds5_bt_disconnected")
-        disconnected_start = connected_end
-        disconnected_end = source.index("static void ds5_bt_security_changed")
+        disconnected_start = source.index(
+            "static void ds5_bt_process_disconnected_event"
+        )
+        disconnected_end = source.index(
+            "static bool ds5_bt_take_disconnect_overflow", disconnected_start
+        )
 
         self.assertIn(
             "ds5_bt_enable_bonded_page_scan()",
@@ -495,10 +501,38 @@ class Ds5BtPolicyTests(unittest.TestCase):
         self.assertIn("bt_unpair(BT_ID_DEFAULT, NULL)", clear_body)
         self.assertNotIn("ef_", clear_body)
 
-    def test_connection_pointer_follows_vendor_sticky_ref_contract(self):
+    def test_deferred_disconnect_keeps_a_balanced_connection_reference(self):
         source = read_bt_sources()
-        self.assertNotIn("bt_conn_ref(", source)
-        self.assertNotIn("bt_conn_unref(", source)
+        self.assertIn("event.conn = bt_conn_ref(conn);", source)
+        self.assertIn("bt_conn_unref(event.conn);", source)
+        self.assertNotIn("bt_conn_unref(active_connection)", source)
+
+    def test_ready_liveness_uses_acl_state_and_supervision_timeout(self):
+        source = read_bt_sources()
+
+        self.assertIn("DS5_BT_LINK_STATE_POLL_MS", source)
+        self.assertIn("BT_CONN_CONNECTED", source)
+        self.assertIn("DS5_BT_HCI_OP_WRITE_LINK_SUPERVISION_TIMEOUT", source)
+        self.assertIn("DS5_BT_ACL_SUPERVISION_TIMEOUT_MS", source)
+        self.assertNotIn("DS5_BT_READY_LINK_TIMEOUT", source)
+        self.assertNotIn("last_activity_tick", source)
+
+    def test_l2cap_worker_drops_events_after_acl_state_is_lost(self):
+        source = read_bt_sources()
+        start = source.index("static void ds5_bt_process_l2cap_event")
+        end = source.index("void ds5_bt_worker", start)
+        body = source[start:end]
+
+        self.assertIn("event->conn->state != BT_CONN_CONNECTED", body)
+
+    def test_l2cap_events_hold_a_balanced_connection_reference(self):
+        source = read_bt_sources()
+
+        self.assertIn(
+            ".conn = conn == NULL ? NULL : bt_conn_ref(conn)", source
+        )
+        self.assertIn("bt_conn_unref(event.conn);", source)
+        self.assertIn("bt_conn_unref(event->conn);", source)
 
     def test_connection_state_machine_keeps_codecs_and_usb_outside_bluetooth(self):
         source = read_bt_sources().lower()

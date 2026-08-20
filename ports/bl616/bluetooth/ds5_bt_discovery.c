@@ -298,7 +298,10 @@ static void ds5_bt_policy_step(void)
 
     ds5_bt_lifecycle_lock();
 
+    ds5_bt_process_link_events();
     ds5_bt_policy_handle_timeout(now);
+    ds5_bt_check_link_liveness();
+    ds5_bt_configure_link_supervision_timeout();
     ds5_bt_process_bond_recovery(now);
     ds5_bt_process_page_scan_retry(now);
 
@@ -347,6 +350,7 @@ static TickType_t ds5_bt_policy_wait_ticks(void)
     TickType_t link_wait;
     TickType_t bond_wait;
     TickType_t page_scan_wait;
+    TickType_t link_state_wait;
 
     ds5_bt_lifecycle_lock();
 
@@ -389,6 +393,13 @@ static TickType_t ds5_bt_policy_wait_ticks(void)
         ds5_bt_ticks_until(now, page_scan_retry_at) : portMAX_DELAY;
     if (page_scan_wait < wait_ticks) {
         wait_ticks = page_scan_wait;
+    }
+
+    link_state_wait = ((bluetooth_state == DS5_BT_STATE_READY) &&
+                       (active_connection != NULL)) ?
+        pdMS_TO_TICKS(DS5_BT_LINK_STATE_POLL_MS) : portMAX_DELAY;
+    if (link_state_wait < wait_ticks) {
+        wait_ticks = link_state_wait;
     }
 
     ds5_bt_lifecycle_unlock();

@@ -58,7 +58,7 @@ bool ds5_bt_connection_matches_saved_peer(const struct bt_conn *conn)
            (bt_addr_cmp(address, &bonded_peer_address) == 0);
 }
 
-static bool ds5_bt_connection_matches_outgoing_target(
+bool ds5_bt_connection_matches_outgoing_target(
     const struct bt_conn *conn)
 {
     const bt_addr_t *address;
@@ -389,35 +389,17 @@ out:
 
 static void ds5_bt_disconnected(struct bt_conn *conn, u8_t reason)
 {
-    bool bonded_link;
-
-    ds5_bt_lifecycle_lock();
-
-    if (conn != active_connection) {
-        ds5_l2cap_abort_connection(conn);
-        if (ds5_bt_connection_matches_outgoing_target(conn)) {
-            outgoing_create_pending = false;
-            if (active_connection == NULL) {
-                memset(&candidate, 0, sizeof(candidate));
-                ds5_bt_set_state(DS5_BT_STATE_IDLE);
-                ds5_bt_open_pairing_window();
-            }
-        }
-
-        /* The SDK clears page scan for every BR disconnection, including
-         * rejected/short-lived peers that never became active_connection. */
-        ds5_bt_enable_bonded_page_scan();
-        goto out;
+    /*
+     * This callback runs from the SDK HCI receive path.  Do not take the
+     * application lifecycle mutex or issue another synchronous HCI command
+     * here: the policy task owns link recovery.  The event queue keeps a
+     * temporary reference so the policy task can safely abort stale L2CAP
+     * channels after the SDK callback returns.
+     */
+    if (!ds5_bt_enqueue_disconnected_event(conn, reason)) {
+        printf("DS5 BT: failed to queue ACL disconnect event; "
+               "recovery fallback armed\r\n");
     }
-
-    printf("DS5 BT: ACL disconnected (reason 0x%02x)\r\n",
-           (unsigned int)reason);
-    bonded_link = active_peer_is_bonded;
-    ds5_bt_reset_link_state();
-    ds5_bt_recover_after_link(bonded_link);
-
-out:
-    ds5_bt_lifecycle_unlock();
 }
 
 static void ds5_bt_security_changed(struct bt_conn *conn, bt_security_t level,
