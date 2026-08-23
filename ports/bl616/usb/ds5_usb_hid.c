@@ -25,6 +25,8 @@
 #define DS5_USB_HID_STACK_DEPTH  (configMINIMAL_STACK_SIZE * 4U)
 #define DS5_USB_HID_PRIORITY     (configMAX_PRIORITIES - 4U)
 #define DS5_USB_HID_WAIT_MS      10U
+#define DS5_USB_HID_DIAGNOSTIC_REFRESH_MS 250U
+#define DS5_USB_HID_DIAGNOSTIC_BANK_COUNT 2U
 
 /* Exact DualSense (USB PID 0x0ce6) HID report model from this repository. */
 static const uint8_t hid_report_descriptor[] = {
@@ -64,6 +66,11 @@ _Static_assert(DS5_USB_INPUT_PAYLOAD_SIZE + 1U ==
                    DS5_USB_HID_IN_REPORT_SIZE,
                "DualSense HID IN report size mismatch");
 
+typedef struct {
+    uint8_t pipeline[DS5_USB_HID_DIAGNOSTIC_REPORT_SIZE];
+    uint8_t transport[DS5_USB_HID_DIAGNOSTIC_REPORT_SIZE];
+} ds5_usb_hid_diagnostic_snapshot_t;
+
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
     uint8_t hid_transmit_report[DS5_USB_HID_IN_REPORT_SIZE];
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
@@ -71,9 +78,12 @@ static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX
     uint8_t hid_receive_report[DS5_USB_OUTPUT_REPORT_SIZE];
 static uint8_t
-    hid_diagnostic_pipeline[DS5_USB_HID_DIAGNOSTIC_REPORT_SIZE];
+    hid_diagnostic_pipeline_response[DS5_USB_HID_DIAGNOSTIC_REPORT_SIZE];
 static uint8_t
-    hid_diagnostic_transport[DS5_USB_HID_DIAGNOSTIC_REPORT_SIZE];
+    hid_diagnostic_transport_response[DS5_USB_HID_DIAGNOSTIC_REPORT_SIZE];
+static ds5_usb_hid_diagnostic_snapshot_t
+    hid_diagnostic_snapshots[DS5_USB_HID_DIAGNOSTIC_BANK_COUNT];
+static volatile uint8_t hid_diagnostic_active_bank;
 
 static struct usbd_interface hid_interface;
 static uint8_t hid_bus_id;
@@ -110,14 +120,14 @@ static void ds5_usb_hid_write_u32_le(uint8_t *destination, uint32_t value)
     destination[3] = (uint8_t)(value >> 24U);
 }
 
-static void ds5_usb_hid_build_pipeline_diagnostics(void)
+static void ds5_usb_hid_build_pipeline_diagnostics(uint8_t *report)
 {
     ds5_usb_audio_diagnostics_t diagnostics;
     uint8_t flags = 0U;
 
     memset(&diagnostics, 0, sizeof(diagnostics));
     ds5_usb_audio_get_diagnostics(&diagnostics);
-    memset(hid_diagnostic_pipeline, 0, sizeof(hid_diagnostic_pipeline));
+    memset(report, 0, DS5_USB_HID_DIAGNOSTIC_REPORT_SIZE);
 
     if (diagnostics.speaker_stream_open) {
         flags |= 0x01U;
@@ -135,47 +145,47 @@ static void ds5_usb_hid_build_pipeline_diagnostics(void)
         flags |= 0x10U;
     }
 
-    hid_diagnostic_pipeline[0] = DS5_USB_HID_DIAGNOSTIC_PIPELINE_ID;
-    memcpy(&hid_diagnostic_pipeline[1], "D5D0", 4U);
-    hid_diagnostic_pipeline[5] = DS5_USB_HID_DIAGNOSTIC_VERSION;
-    hid_diagnostic_pipeline[6] = flags;
-    hid_diagnostic_pipeline[7] = ds5_usb_hid_bounded_u8(
+    report[0] = DS5_USB_HID_DIAGNOSTIC_PIPELINE_ID;
+    memcpy(&report[1], "D5D0", 4U);
+    report[5] = DS5_USB_HID_DIAGNOSTIC_VERSION;
+    report[6] = flags;
+    report[7] = ds5_usb_hid_bounded_u8(
         diagnostics.speaker_encode_overruns);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[8],
+    ds5_usb_hid_write_u32_le(&report[8],
                               diagnostics.received_packets);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[12],
+    ds5_usb_hid_write_u32_le(&report[12],
                               diagnostics.invalid_packets);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[16],
+    ds5_usb_hid_write_u32_le(&report[16],
                               diagnostics.dropped_packets);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[20],
+    ds5_usb_hid_write_u32_le(&report[20],
                               diagnostics.arm_failures);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[24],
+    ds5_usb_hid_write_u32_le(&report[24],
                               diagnostics.usb_interval_gap_count);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[28],
+    ds5_usb_hid_write_u32_le(&report[28],
                               diagnostics.max_usb_interval_us);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[32],
+    ds5_usb_hid_write_u32_le(&report[32],
                               diagnostics.published_haptics_blocks);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[36],
+    ds5_usb_hid_write_u32_le(&report[36],
                               diagnostics.dropped_haptics_blocks);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[40],
+    ds5_usb_hid_write_u32_le(&report[40],
                               diagnostics.dropped_speaker_input_frames);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[44],
+    ds5_usb_hid_write_u32_le(&report[44],
                               diagnostics.published_speaker_frames);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[48],
+    ds5_usb_hid_write_u32_le(&report[48],
                               diagnostics.dropped_speaker_opus_frames);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_pipeline[52],
+    ds5_usb_hid_write_u32_le(&report[52],
                               diagnostics.speaker_encode_count);
-    ds5_usb_hid_write_u16_le(&hid_diagnostic_pipeline[56],
+    ds5_usb_hid_write_u16_le(&report[56],
         ds5_usb_hid_bounded_u16(diagnostics.average_speaker_encode_us));
-    ds5_usb_hid_write_u16_le(&hid_diagnostic_pipeline[58],
+    ds5_usb_hid_write_u16_le(&report[58],
         ds5_usb_hid_bounded_u16(diagnostics.max_speaker_encode_us));
-    ds5_usb_hid_write_u16_le(&hid_diagnostic_pipeline[60],
+    ds5_usb_hid_write_u16_le(&report[60],
         diagnostics.audio_task_stack_high_water_words);
-    ds5_usb_hid_write_u16_le(&hid_diagnostic_pipeline[62],
+    ds5_usb_hid_write_u16_le(&report[62],
         diagnostics.codec_task_stack_high_water_words);
 }
 
-static void ds5_usb_hid_build_transport_diagnostics(void)
+static void ds5_usb_hid_build_transport_diagnostics(uint8_t *report)
 {
     ds5_bt_diagnostics_t bt_diagnostics;
     ds5_l2cap_diagnostics_t transport;
@@ -185,7 +195,7 @@ static void ds5_usb_hid_build_transport_diagnostics(void)
     memset(&transport, 0, sizeof(transport));
     ds5_bt_get_diagnostics(&bt_diagnostics);
     ds5_l2cap_get_diagnostics(&transport);
-    memset(hid_diagnostic_transport, 0, sizeof(hid_diagnostic_transport));
+    memset(report, 0, DS5_USB_HID_DIAGNOSTIC_REPORT_SIZE);
 
     if (bt_diagnostics.control_channel_ready) {
         flags |= 0x01U;
@@ -194,45 +204,86 @@ static void ds5_usb_hid_build_transport_diagnostics(void)
         flags |= 0x02U;
     }
 
-    hid_diagnostic_transport[0] = DS5_USB_HID_DIAGNOSTIC_TRANSPORT_ID;
-    memcpy(&hid_diagnostic_transport[1], "D5D1", 4U);
-    hid_diagnostic_transport[5] = DS5_USB_HID_DIAGNOSTIC_VERSION;
-    hid_diagnostic_transport[6] = (uint8_t)bt_diagnostics.state;
-    hid_diagnostic_transport[7] = flags;
-    ds5_usb_hid_write_u16_le(&hid_diagnostic_transport[8],
+    report[0] = DS5_USB_HID_DIAGNOSTIC_TRANSPORT_ID;
+    memcpy(&report[1], "D5D1", 4U);
+    report[5] = DS5_USB_HID_DIAGNOSTIC_VERSION;
+    report[6] = (uint8_t)bt_diagnostics.state;
+    report[7] = flags;
+    ds5_usb_hid_write_u16_le(&report[8],
                               transport.hci_br_acl_mtu);
-    hid_diagnostic_transport[10] = transport.hci_free_packets;
-    hid_diagnostic_transport[11] = transport.hci_max_free_packets;
-    hid_diagnostic_transport[12] = transport.hci_min_free_packets;
-    hid_diagnostic_transport[13] = transport.connection_tx_queue_depth;
-    hid_diagnostic_transport[14] = transport.max_connection_tx_queue_depth;
-    hid_diagnostic_transport[15] = transport.completion_sample_slots_busy;
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[16],
+    report[10] = transport.hci_free_packets;
+    report[11] = transport.hci_max_free_packets;
+    report[12] = transport.hci_min_free_packets;
+    report[13] = transport.connection_tx_queue_depth;
+    report[14] = transport.max_connection_tx_queue_depth;
+    report[15] = transport.completion_sample_slots_busy;
+    ds5_usb_hid_write_u32_le(&report[16],
                               transport.audio_send_attempts);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[20],
+    ds5_usb_hid_write_u32_le(&report[20],
                               transport.audio_send_accepted);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[24],
+    ds5_usb_hid_write_u32_le(&report[24],
                               transport.audio_send_immediate_failures);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[28],
+    ds5_usb_hid_write_u32_le(&report[28],
                               transport.audio_send_enobufs);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[32],
+    ds5_usb_hid_write_u32_le(&report[32],
                               transport.max_audio_submit_interval_us);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[36],
+    ds5_usb_hid_write_u32_le(&report[36],
                               transport.hci_zero_slot_observations);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[40],
+    ds5_usb_hid_write_u32_le(&report[40],
                               transport.completion_samples_submitted);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[44],
+    ds5_usb_hid_write_u32_le(&report[44],
                               transport.completion_samples_completed);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[48],
+    ds5_usb_hid_write_u32_le(&report[48],
                               transport.last_completion_latency_us);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[52],
+    ds5_usb_hid_write_u32_le(&report[52],
                               transport.max_completion_latency_us);
-    ds5_usb_hid_write_u32_le(&hid_diagnostic_transport[56],
+    ds5_usb_hid_write_u32_le(&report[56],
                               transport.average_completion_latency_us);
-    ds5_usb_hid_write_u16_le(&hid_diagnostic_transport[60],
+    ds5_usb_hid_write_u16_le(&report[60],
         bt_diagnostics.tx_worker_task_stack_high_water_words);
-    ds5_usb_hid_write_u16_le(&hid_diagnostic_transport[62],
+    ds5_usb_hid_write_u16_le(&report[62],
         bt_diagnostics.worker_task_stack_high_water_words);
+}
+
+static void ds5_usb_hid_refresh_diagnostics(void)
+{
+    ds5_usb_hid_diagnostic_snapshot_t *snapshot;
+    uint8_t bank;
+
+    configASSERT(!xPortIsInsideInterrupt());
+
+    bank = (uint8_t)(hid_diagnostic_active_bank ^ 1U);
+    snapshot = &hid_diagnostic_snapshots[bank];
+    ds5_usb_hid_build_pipeline_diagnostics(snapshot->pipeline);
+    ds5_usb_hid_build_transport_diagnostics(snapshot->transport);
+
+    /* Publish both complete reports as one coherent task-context snapshot. */
+    __sync_synchronize();
+    hid_diagnostic_active_bank = bank;
+}
+
+static void ds5_usb_hid_copy_diagnostic_report(uint8_t report_id,
+                                                uint8_t **data,
+                                                uint32_t *length)
+{
+    const uint8_t *snapshot;
+    uint8_t *response;
+    uint8_t bank = hid_diagnostic_active_bank;
+
+    /* Pair with the task-side publish barrier before reading the active bank. */
+    __sync_synchronize();
+    if (report_id == DS5_USB_HID_DIAGNOSTIC_PIPELINE_ID) {
+        snapshot = hid_diagnostic_snapshots[bank].pipeline;
+        response = hid_diagnostic_pipeline_response;
+    } else {
+        snapshot = hid_diagnostic_snapshots[bank].transport;
+        response = hid_diagnostic_transport_response;
+    }
+
+    /* EP0 is serialized; keep its source stable after the active bank flips. */
+    memcpy(response, snapshot, DS5_USB_HID_DIAGNOSTIC_REPORT_SIZE);
+    *data = response;
+    *length = DS5_USB_HID_DIAGNOSTIC_REPORT_SIZE;
 }
 
 static void ds5_usb_hid_notify(void)
@@ -371,15 +422,11 @@ void usbd_hid_get_report(uint8_t busid, uint8_t interface,
         size_t cached_length;
 
         if (report_id == DS5_USB_HID_DIAGNOSTIC_PIPELINE_ID) {
-            ds5_usb_hid_build_pipeline_diagnostics();
-            *data = hid_diagnostic_pipeline;
-            *length = sizeof(hid_diagnostic_pipeline);
+            ds5_usb_hid_copy_diagnostic_report(report_id, data, length);
             return;
         }
         if (report_id == DS5_USB_HID_DIAGNOSTIC_TRANSPORT_ID) {
-            ds5_usb_hid_build_transport_diagnostics();
-            *data = hid_diagnostic_transport;
-            *length = sizeof(hid_diagnostic_transport);
+            ds5_usb_hid_copy_diagnostic_report(report_id, data, length);
             return;
         }
 
@@ -434,10 +481,19 @@ void usbd_hid_set_report(uint8_t busid, uint8_t interface,
 static void ds5_usb_hid_task(void *parameter)
 {
     uint8_t payload[DS5_USB_INPUT_PAYLOAD_SIZE];
+    TickType_t last_diagnostic_refresh = xTaskGetTickCount();
 
     (void)parameter;
 
     while (1) {
+        TickType_t now = xTaskGetTickCount();
+
+        if ((now - last_diagnostic_refresh) >=
+            pdMS_TO_TICKS(DS5_USB_HID_DIAGNOSTIC_REFRESH_MS)) {
+            ds5_usb_hid_refresh_diagnostics();
+            last_diagnostic_refresh = now;
+        }
+
         if (!hid_configured) {
             (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100U));
             continue;
@@ -484,7 +540,14 @@ int ds5_usb_hid_init(uint8_t busid)
     memset(hid_transmit_report, 0, sizeof(hid_transmit_report));
     memset(hid_last_report, 0, sizeof(hid_last_report));
     memset(hid_receive_report, 0, sizeof(hid_receive_report));
+    memset(hid_diagnostic_snapshots, 0, sizeof(hid_diagnostic_snapshots));
+    memset(hid_diagnostic_pipeline_response, 0,
+           sizeof(hid_diagnostic_pipeline_response));
+    memset(hid_diagnostic_transport_response, 0,
+           sizeof(hid_diagnostic_transport_response));
+    hid_diagnostic_active_bank = 0U;
     hid_last_report[0] = DS5_USB_INPUT_REPORT_ID;
+    ds5_usb_hid_refresh_diagnostics();
 
     hid_task = xTaskCreateStatic(ds5_usb_hid_task, "usb_hid",
                                  DS5_USB_HID_STACK_DEPTH, NULL,

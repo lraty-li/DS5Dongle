@@ -252,6 +252,30 @@ class Ds5UsbHidTests(unittest.TestCase):
         )
         self.assertIn("entry->length[bank] = length + 1U;", source)
 
+    def test_diagnostic_reports_are_snapshotted_outside_usb_callback(self):
+        source = HID_SOURCE.read_text(encoding="utf-8")
+        callback_start = source.index("void usbd_hid_get_report(")
+        callback_end = source.index("void usbd_hid_set_report(", callback_start)
+        callback = source[callback_start:callback_end]
+        refresh_start = source.index(
+            "static void ds5_usb_hid_refresh_diagnostics(void)"
+        )
+        refresh_end = source.index(
+            "static void ds5_usb_hid_copy_diagnostic_report", refresh_start
+        )
+        refresh = source[refresh_start:refresh_end]
+
+        self.assertIn("DS5_USB_HID_DIAGNOSTIC_BANK_COUNT 2U", source)
+        self.assertIn("ds5_usb_hid_copy_diagnostic_report", callback)
+        self.assertNotIn("ds5_usb_hid_build_pipeline_diagnostics", callback)
+        self.assertNotIn("ds5_usb_hid_build_transport_diagnostics", callback)
+        self.assertNotIn("ds5_usb_audio_get_diagnostics", callback)
+        self.assertNotIn("ds5_bt_get_diagnostics", callback)
+        self.assertNotIn("ds5_l2cap_get_diagnostics", callback)
+        self.assertIn("configASSERT(!xPortIsInsideInterrupt())", refresh)
+        self.assertIn("__sync_synchronize();", refresh)
+        self.assertIn("ds5_usb_hid_refresh_diagnostics();", source)
+
     def test_bluetooth_publishes_only_validated_payload(self):
         source = read_bt_sources()
         valid_start = source.index("if (protocol_result == DS5_PROTOCOL_OK)")
