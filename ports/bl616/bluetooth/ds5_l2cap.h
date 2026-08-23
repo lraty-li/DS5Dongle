@@ -88,6 +88,8 @@ int ds5_l2cap_send(ds5_l2cap_channel_t channel, const uint8_t *data,
 /* Non-blocking handoff for a future Bluetooth worker task. */
 bool ds5_l2cap_event_try_receive(ds5_l2cap_event_t *event);
 bool ds5_l2cap_event_receive(ds5_l2cap_event_t *event);
+bool ds5_l2cap_event_receive_timeout(ds5_l2cap_event_t *event,
+                                     uint32_t timeout_ms);
 uint32_t ds5_l2cap_dropped_event_count(void);
 void ds5_l2cap_get_diagnostics(ds5_l2cap_diagnostics_t *diagnostics);
 

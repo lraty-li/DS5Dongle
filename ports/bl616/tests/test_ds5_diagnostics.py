@@ -17,7 +17,7 @@ SPEC.loader.exec_module(DIAGNOSTICS)
 class Ds5DiagnosticsTests(unittest.TestCase):
     def test_pipeline_wire_format_decodes_little_endian_counters(self):
         report = bytearray(64)
-        report[0:7] = bytes([0xF0]) + b"D5D0" + bytes([1, 0x1D])
+        report[0:7] = bytes([0xF0]) + b"D5D0" + bytes([1, 0x7D])
         report[7] = 3
         struct.pack_into("<IIIIIIIIIIII", report, 8, *range(10, 22))
         struct.pack_into("<HHHH", report, 56, 7000, 12000, 100, 200)
@@ -26,6 +26,8 @@ class Ds5DiagnosticsTests(unittest.TestCase):
 
         self.assertTrue(decoded["speaker_stream_open"])
         self.assertTrue(decoded["codec_ready"])
+        self.assertTrue(decoded["hid_out_arm_failure_seen"])
+        self.assertTrue(decoded["hid_out_arm_retry_pending"])
         self.assertEqual(decoded["usb_packets"], 10)
         self.assertEqual(decoded["encode_count"], 21)
         self.assertEqual(decoded["encode_average_us"], 7000)
@@ -33,7 +35,7 @@ class Ds5DiagnosticsTests(unittest.TestCase):
 
     def test_transport_wire_format_reports_hci_completion_latency(self):
         report = bytearray(64)
-        report[0:8] = bytes([0xF1]) + b"D5D1" + bytes([1, 8, 3])
+        report[0:8] = bytes([0xF1]) + b"D5D1" + bytes([1, 8, 0x7F])
         struct.pack_into("<H", report, 8, 251)
         report[10:16] = bytes([1, 4, 0, 2, 3, 1])
         struct.pack_into("<IIIIIIIIIII", report, 16, *range(30, 41))
@@ -42,6 +44,11 @@ class Ds5DiagnosticsTests(unittest.TestCase):
         decoded = DIAGNOSTICS.decode_transport(bytes(report))
 
         self.assertEqual(decoded["bt_state"], "ready")
+        self.assertTrue(decoded["feature_prefetch_complete"])
+        self.assertTrue(decoded["feature_request_pending"])
+        self.assertTrue(decoded["feature_prefetch_failed"])
+        self.assertTrue(decoded["feature_prefetch_retried_since_boot"])
+        self.assertTrue(decoded["feature_prefetch_timed_out_since_boot"])
         self.assertEqual(decoded["estimated_acl_fragments_per_audio_report"], 3)
         self.assertEqual(decoded["audio_send_attempts"], 30)
         self.assertEqual(decoded["completion_average_us"], 40)

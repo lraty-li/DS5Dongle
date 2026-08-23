@@ -322,6 +322,9 @@ void ds5_bt_tx_worker(void *parameter)
         ds5_bt_get_tx_link_state(&link_state);
         if (observed_link_generation != link_state.link_generation) {
             observed_link_generation = link_state.link_generation;
+            /* Feature SET belongs to the USB/ACL session that queued it. */
+            pending_feature_set = false;
+            ds5_feature_set_mailbox_clear();
             controller_microphone_muted = false;
             pending_microphone_mute = false;
             pending_microphone_state = true;

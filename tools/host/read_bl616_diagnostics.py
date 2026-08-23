@@ -59,6 +59,8 @@ def decode_pipeline(data: bytes) -> dict[str, int | bool]:
         "codec_ready": bool(flags & 0x04),
         "encode_overrun_seen": bool(flags & 0x08),
         "usb_gap_seen": bool(flags & 0x10),
+        "hid_out_arm_failure_seen": bool(flags & 0x20),
+        "hid_out_arm_retry_pending": bool(flags & 0x40),
         "encode_overruns": data[7],
         "usb_packets": _u32(data, 8),
         "usb_invalid": _u32(data, 12),
@@ -105,6 +107,11 @@ def decode_transport(data: bytes) -> dict[str, int | bool | str]:
         "bt_state": state_names.get(state_number, f"unknown-{state_number}"),
         "control_channel_ready": bool(flags & 0x01),
         "interrupt_channel_ready": bool(flags & 0x02),
+        "feature_prefetch_complete": bool(flags & 0x04),
+        "feature_request_pending": bool(flags & 0x08),
+        "feature_prefetch_failed": bool(flags & 0x10),
+        "feature_prefetch_retried_since_boot": bool(flags & 0x20),
+        "feature_prefetch_timed_out_since_boot": bool(flags & 0x40),
         "hci_acl_mtu": mtu,
         "estimated_acl_fragments_per_audio_report": (
             math.ceil((548 + 4) / mtu) if mtu else 0

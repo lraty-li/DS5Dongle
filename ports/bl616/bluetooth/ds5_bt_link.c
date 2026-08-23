@@ -217,7 +217,12 @@ void ds5_bt_reset_link_state(void)
     interrupt_channel_ready = false;
     calibration_response_received = false;
     feature_request_pending = false;
+    feature_prefetch_complete = false;
+    feature_prefetch_failed = false;
     feature_prefetch_index = 0U;
+    feature_request_attempts = 0U;
+    feature_request_deadline = 0U;
+    feature_request_retry_at = 0U;
     initialization_pending = false;
     headset_connected = false;
     microphone_button_pressed = false;

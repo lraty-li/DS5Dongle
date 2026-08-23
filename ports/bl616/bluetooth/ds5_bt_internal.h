@@ -21,6 +21,9 @@
 #define DS5_BT_POLICY_STACK_DEPTH     (configMINIMAL_STACK_SIZE * 3U)
 #define DS5_BT_OUTPUT_READY_TIMEOUT_MS 5000U
 #define DS5_BT_TX_RETRY_MS             1U
+#define DS5_BT_FEATURE_RESPONSE_TIMEOUT_MS 500U
+#define DS5_BT_FEATURE_RETRY_MS          20U
+#define DS5_BT_FEATURE_MAX_ATTEMPTS       3U
 #define DS5_BT_DEFAULT_MIC_SELECT      0U
 #define DS5_BT_PAIRING_WINDOW_MS       20000U
 #define DS5_BT_DISCOVERY_RETRY_MS      750U
@@ -58,7 +61,15 @@ extern bool control_channel_ready;
 extern bool interrupt_channel_ready;
 extern bool calibration_response_received;
 extern bool feature_request_pending;
+extern bool feature_prefetch_complete;
+extern bool feature_prefetch_failed;
 extern size_t feature_prefetch_index;
+extern uint8_t feature_request_attempts;
+extern TickType_t feature_request_deadline;
+extern TickType_t feature_request_retry_at;
+extern uint32_t feature_prefetch_retries;
+extern uint32_t feature_prefetch_timeouts;
+extern uint32_t feature_prefetch_failures;
 extern volatile uint32_t received_l2cap_packets;
 extern uint32_t received_control_packets;
 extern uint32_t received_interrupt_packets;

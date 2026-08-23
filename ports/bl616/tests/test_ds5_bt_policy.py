@@ -482,6 +482,55 @@ class Ds5BtPolicyTests(unittest.TestCase):
             "ds5_audio_mailbox_try_receive_speaker_opus(", body
         )
 
+    def test_link_generation_discards_stale_feature_set_requests(self):
+        source = read_bt_sources()
+        mailbox = (
+            BL616_DIR / "platform" / "ds5_feature_set_mailbox.c"
+        ).read_text(encoding="utf-8")
+        start = source.index(
+            "if (observed_link_generation != link_state.link_generation)"
+        )
+        end = source.index("if (!pending_feature_set", start)
+        body = source[start:end]
+
+        self.assertIn("pending_feature_set = false;", body)
+        self.assertIn("ds5_feature_set_mailbox_clear();", body)
+        self.assertIn("xQueueReset(feature_set_queue)", mailbox)
+        self.assertIn("configASSERT(!xPortIsInsideInterrupt())", mailbox)
+
+    def test_feature_prefetch_has_bounded_timeout_and_retry(self):
+        source = read_bt_sources()
+        start = source.index(
+            "static void ds5_bt_handle_feature_request_failure"
+        )
+        end = source.index("static void ds5_bt_process_l2cap_event", start)
+        prefetch = source[start:end]
+
+        self.assertIn("DS5_BT_FEATURE_RESPONSE_TIMEOUT_MS", prefetch)
+        self.assertIn("DS5_BT_FEATURE_RETRY_MS", prefetch)
+        self.assertIn("DS5_BT_FEATURE_MAX_ATTEMPTS", prefetch)
+        self.assertIn("feature_request_deadline", prefetch)
+        self.assertIn("-ETIMEDOUT", prefetch)
+        self.assertIn("(int32_t)(now - deadline)", source)
+        self.assertIn("ds5_l2cap_event_receive_timeout", source)
+        self.assertIn("feature_prefetch_complete = true;", prefetch)
+        self.assertIn("feature_prefetch_failed = true;", prefetch)
+
+    def test_late_feature_response_completes_timed_out_request(self):
+        source = read_bt_sources()
+        start = source.index("case DS5_L2CAP_EVENT_DATA:")
+        end = source.index("received_interrupt_packets", start)
+        control_data = source[start:end]
+
+        self.assertIn("if (feature_cached &&", control_data)
+        self.assertIn(
+            "feature_prefetch_ids[feature_prefetch_index]", control_data
+        )
+        self.assertIn("feature_request_attempts = 0U;", control_data)
+        self.assertNotIn(
+            "if (feature_request_pending &&", control_data
+        )
+
     def test_discovery_stop_is_completed_without_waiting_for_callback(self):
         source = read_bt_sources()
         start = source.index("static void ds5_bt_stop_discovery_if_needed")

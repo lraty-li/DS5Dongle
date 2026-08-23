@@ -68,3 +68,13 @@ bool ds5_feature_set_mailbox_try_receive(ds5_feature_set_request_t *request)
 
     return xQueueReceive(feature_set_queue, request, 0U) == pdPASS;
 }
+
+void ds5_feature_set_mailbox_clear(void)
+{
+    if (feature_set_queue == NULL) {
+        return;
+    }
+
+    configASSERT(!xPortIsInsideInterrupt());
+    (void)xQueueReset(feature_set_queue);
+}

@@ -22,6 +22,8 @@ bool ds5_feature_set_mailbox_publish(uint8_t report_id,
                                      const uint8_t *payload,
                                      size_t length);
 bool ds5_feature_set_mailbox_try_receive(ds5_feature_set_request_t *request);
+/* Task-context API used when a Bluetooth link generation changes. */
+void ds5_feature_set_mailbox_clear(void);
 
 #ifdef __cplusplus
 }

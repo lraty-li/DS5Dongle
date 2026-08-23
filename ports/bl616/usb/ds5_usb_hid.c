@@ -27,6 +27,7 @@
 #define DS5_USB_HID_WAIT_MS      10U
 #define DS5_USB_HID_DIAGNOSTIC_REFRESH_MS 250U
 #define DS5_USB_HID_DIAGNOSTIC_BANK_COUNT 2U
+#define DS5_USB_HID_OUT_RETRY_MS 2U
 
 /* Exact DualSense (USB PID 0x0ce6) HID report model from this repository. */
 static const uint8_t hid_report_descriptor[] = {
@@ -91,6 +92,9 @@ static volatile bool hid_configured;
 static volatile bool hid_suspended;
 static volatile bool hid_busy;
 static volatile bool hid_out_read_pending;
+static volatile bool hid_out_arm_retry_pending;
+static volatile TickType_t hid_out_arm_retry_at;
+static volatile uint32_t hid_out_arm_failures;
 
 static StaticTask_t hid_task_storage;
 static StackType_t hid_task_stack[DS5_USB_HID_STACK_DEPTH];
@@ -143,6 +147,12 @@ static void ds5_usb_hid_build_pipeline_diagnostics(uint8_t *report)
     }
     if (diagnostics.usb_interval_gap_count != 0U) {
         flags |= 0x10U;
+    }
+    if (hid_out_arm_failures != 0U) {
+        flags |= 0x20U;
+    }
+    if (hid_out_arm_retry_pending) {
+        flags |= 0x40U;
     }
 
     report[0] = DS5_USB_HID_DIAGNOSTIC_PIPELINE_ID;
@@ -202,6 +212,21 @@ static void ds5_usb_hid_build_transport_diagnostics(uint8_t *report)
     }
     if (bt_diagnostics.interrupt_channel_ready) {
         flags |= 0x02U;
+    }
+    if (bt_diagnostics.feature_prefetch_complete) {
+        flags |= 0x04U;
+    }
+    if (bt_diagnostics.feature_request_pending) {
+        flags |= 0x08U;
+    }
+    if (bt_diagnostics.feature_prefetch_failed) {
+        flags |= 0x10U;
+    }
+    if (bt_diagnostics.feature_prefetch_retries != 0U) {
+        flags |= 0x20U;
+    }
+    if (bt_diagnostics.feature_prefetch_timeouts != 0U) {
+        flags |= 0x40U;
     }
 
     report[0] = DS5_USB_HID_DIAGNOSTIC_TRANSPORT_ID;
@@ -361,15 +386,25 @@ static bool ds5_usb_hid_publish_feature_set(uint8_t report_id,
 
 static void ds5_usb_hid_arm_out(void)
 {
+    TickType_t now;
+
     if (!hid_configured || hid_suspended || hid_out_read_pending) {
         return;
     }
 
+    hid_out_arm_retry_pending = false;
     hid_out_read_pending = true;
     if (usbd_ep_start_read(hid_bus_id, DS5_USB_HID_OUT_EP,
                            hid_receive_report,
                            sizeof(hid_receive_report)) != 0) {
         hid_out_read_pending = false;
+        ++hid_out_arm_failures;
+        now = xPortIsInsideInterrupt() ? xTaskGetTickCountFromISR() :
+                                         xTaskGetTickCount();
+        hid_out_arm_retry_at = now +
+            pdMS_TO_TICKS(DS5_USB_HID_OUT_RETRY_MS);
+        hid_out_arm_retry_pending = true;
+        ds5_usb_hid_notify();
     }
 }
 
@@ -493,6 +528,10 @@ static void ds5_usb_hid_task(void *parameter)
             ds5_usb_hid_refresh_diagnostics();
             last_diagnostic_refresh = now;
         }
+        if (hid_out_arm_retry_pending &&
+            ((int32_t)(now - hid_out_arm_retry_at) >= 0)) {
+            ds5_usb_hid_arm_out();
+        }
 
         if (!hid_configured) {
             (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100U));
@@ -537,6 +576,9 @@ int ds5_usb_hid_init(uint8_t busid)
     hid_suspended = false;
     hid_busy = false;
     hid_out_read_pending = false;
+    hid_out_arm_retry_pending = false;
+    hid_out_arm_retry_at = 0U;
+    hid_out_arm_failures = 0U;
     memset(hid_transmit_report, 0, sizeof(hid_transmit_report));
     memset(hid_last_report, 0, sizeof(hid_last_report));
     memset(hid_receive_report, 0, sizeof(hid_receive_report));
@@ -589,19 +631,27 @@ void ds5_usb_hid_handle_event(uint8_t busid, uint8_t event)
         hid_suspended = false;
         hid_busy = false;
         hid_out_read_pending = false;
+        hid_out_arm_retry_pending = false;
+        hid_out_arm_retry_at = 0U;
         break;
     case USBD_EVENT_CONFIGURED:
         hid_configured = true;
         hid_suspended = false;
         hid_busy = false;
         hid_out_read_pending = false;
+        hid_out_arm_retry_pending = false;
+        hid_out_arm_retry_at = 0U;
         ds5_usb_hid_arm_out();
         break;
     case USBD_EVENT_SUSPEND:
         hid_suspended = true;
+        hid_out_arm_retry_pending = false;
+        hid_out_arm_retry_at = 0U;
         break;
     case USBD_EVENT_RESUME:
         hid_suspended = false;
+        hid_out_arm_retry_pending = false;
+        hid_out_arm_retry_at = 0U;
         ds5_usb_hid_arm_out();
         break;
     default:

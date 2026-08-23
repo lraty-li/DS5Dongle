@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 
 #include "conn.h"
@@ -22,6 +23,47 @@ static const uint8_t feature_prefetch_ids[] = {
     0x05U,
 };
 
+#define DS5_BT_FEATURE_PREFETCH_COUNT \
+    (sizeof(feature_prefetch_ids) / sizeof(feature_prefetch_ids[0]))
+
+static bool ds5_bt_feature_deadline_expired(TickType_t now,
+                                             TickType_t deadline)
+{
+    return (int32_t)(now - deadline) >= 0;
+}
+
+static void ds5_bt_handle_feature_request_failure(uint8_t report_id,
+                                                   int err)
+{
+    feature_request_pending = false;
+    feature_request_deadline = 0U;
+
+    if (feature_request_attempts < DS5_BT_FEATURE_MAX_ATTEMPTS) {
+        ++feature_prefetch_retries;
+        feature_request_retry_at = xTaskGetTickCount() +
+            pdMS_TO_TICKS(DS5_BT_FEATURE_RETRY_MS);
+        printf("DS5 BT: Feature 0x%02x attempt %u/%u failed "
+               "(err %d); retrying\r\n",
+               (unsigned int)report_id,
+               (unsigned int)feature_request_attempts,
+               (unsigned int)DS5_BT_FEATURE_MAX_ATTEMPTS, err);
+        return;
+    }
+
+    ++feature_prefetch_failures;
+    feature_prefetch_failed = true;
+    printf("DS5 BT: Feature 0x%02x abandoned after %u attempt(s) "
+           "(err %d)\r\n",
+           (unsigned int)report_id,
+           (unsigned int)feature_request_attempts, err);
+    ++feature_prefetch_index;
+    feature_request_attempts = 0U;
+    feature_request_retry_at = 0U;
+    if (feature_prefetch_index >= DS5_BT_FEATURE_PREFETCH_COUNT) {
+        feature_prefetch_complete = true;
+    }
+}
+
 static int ds5_bt_request_next_feature(void)
 {
     uint8_t transaction[DS5_FEATURE_GET_TRANSACTION_SIZE];
@@ -31,12 +73,12 @@ static int ds5_bt_request_next_feature(void)
     int err;
 
     if (!control_channel_ready || feature_request_pending ||
-        (feature_prefetch_index >=
-         (sizeof(feature_prefetch_ids) / sizeof(feature_prefetch_ids[0])))) {
+        (feature_prefetch_index >= DS5_BT_FEATURE_PREFETCH_COUNT)) {
         return 0;
     }
 
     report_id = feature_prefetch_ids[feature_prefetch_index];
+    ++feature_request_attempts;
     protocol_result = ds5_build_feature_get_transaction(
         report_id,
         transaction, sizeof(transaction), &transaction_length);
@@ -51,13 +93,78 @@ static int ds5_bt_request_next_feature(void)
     }
 
     feature_request_pending = true;
-    printf("DS5 BT: Feature 0x%02x requested (%u/%u)\r\n",
+    feature_request_retry_at = 0U;
+    feature_request_deadline = xTaskGetTickCount() +
+        pdMS_TO_TICKS(DS5_BT_FEATURE_RESPONSE_TIMEOUT_MS);
+    printf("DS5 BT: Feature 0x%02x requested (%u/%u, attempt %u/%u)\r\n",
            (unsigned int)report_id,
            (unsigned int)(feature_prefetch_index + 1U),
-           (unsigned int)(sizeof(feature_prefetch_ids) /
-                          sizeof(feature_prefetch_ids[0])));
+           (unsigned int)DS5_BT_FEATURE_PREFETCH_COUNT,
+           (unsigned int)feature_request_attempts,
+           (unsigned int)DS5_BT_FEATURE_MAX_ATTEMPTS);
     return 0;
 }
+
+static void ds5_bt_service_feature_prefetch(void)
+{
+    TickType_t now;
+    uint8_t report_id;
+    int err;
+
+    if ((bluetooth_state != DS5_BT_STATE_READY) ||
+        !control_channel_ready || !interrupt_channel_ready ||
+        feature_prefetch_complete) {
+        return;
+    }
+    if (feature_prefetch_index >= DS5_BT_FEATURE_PREFETCH_COUNT) {
+        feature_prefetch_complete = true;
+        return;
+    }
+
+    now = xTaskGetTickCount();
+    if (feature_request_pending) {
+        if (!ds5_bt_feature_deadline_expired(
+                now, feature_request_deadline)) {
+            return;
+        }
+
+        report_id = feature_prefetch_ids[feature_prefetch_index];
+        ++feature_prefetch_timeouts;
+        ds5_bt_handle_feature_request_failure(report_id, -ETIMEDOUT);
+    }
+
+    while ((bluetooth_state == DS5_BT_STATE_READY) &&
+           control_channel_ready && interrupt_channel_ready &&
+           !feature_prefetch_complete && !feature_request_pending) {
+        if (feature_prefetch_index >= DS5_BT_FEATURE_PREFETCH_COUNT) {
+            feature_prefetch_complete = true;
+            return;
+        }
+
+        now = xTaskGetTickCount();
+        if ((feature_request_attempts != 0U) &&
+            !ds5_bt_feature_deadline_expired(
+                now, feature_request_retry_at)) {
+            return;
+        }
+
+        report_id = feature_prefetch_ids[feature_prefetch_index];
+        err = ds5_bt_request_next_feature();
+        if (err == 0) {
+            return;
+        }
+
+        ds5_bt_handle_feature_request_failure(report_id, err);
+    }
+}
+
+static bool ds5_bt_feature_prefetch_active(void)
+{
+    return (bluetooth_state == DS5_BT_STATE_READY) &&
+           control_channel_ready && interrupt_channel_ready &&
+           !feature_prefetch_complete;
+}
+
 static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
 {
     ds5_protocol_result_t protocol_result;
@@ -86,13 +193,6 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
 
         if (control_channel_ready && interrupt_channel_ready &&
             (active_connection != NULL)) {
-            int request_err = ds5_bt_request_next_feature();
-
-            if (request_err != 0) {
-                printf("DS5 BT: Feature prefetch request failed "
-                       "(err %d)\r\n",
-                       request_err);
-            }
             initialization_pending = true;
             ds5_bt_set_state(DS5_BT_STATE_READY);
         }
@@ -114,20 +214,23 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
     case DS5_L2CAP_EVENT_DATA:
         ++received_l2cap_packets;
         if (event->channel == DS5_L2CAP_CHANNEL_CONTROL) {
+            bool feature_cached;
             uint8_t report_id;
 
             ++received_control_packets;
             if ((event->length >= 2U) &&
                 (event->data[0] == DS5_FEATURE_DATA_HEADER)) {
                 report_id = event->data[1];
-                if (ds5_feature_cache_store(report_id, &event->data[2],
-                                            event->length - 2U)) {
+                feature_cached = ds5_feature_cache_store(
+                    report_id, &event->data[2], event->length - 2U);
+                if (feature_cached) {
                     printf("DS5 BT: Feature 0x%02x cached (length %u)\r\n",
                            (unsigned int)report_id,
                            (unsigned int)(event->length - 2U));
                 }
 
-                if ((report_id == DS5_FEATURE_CALIBRATION_REPORT_ID) &&
+                if (feature_cached &&
+                    (report_id == DS5_FEATURE_CALIBRATION_REPORT_ID) &&
                     !calibration_response_received) {
                     printf("DS5 BT: calibration Feature 0x05 response "
                            "received (length %u)\r\n",
@@ -135,20 +238,20 @@ static void ds5_bt_process_l2cap_event(const ds5_l2cap_event_t *event)
                     calibration_response_received = true;
                 }
 
-                if (feature_request_pending &&
+                if (feature_cached &&
                     (feature_prefetch_index <
-                     (sizeof(feature_prefetch_ids) /
-                      sizeof(feature_prefetch_ids[0]))) &&
-                    (report_id == feature_prefetch_ids[feature_prefetch_index])) {
-                    int request_err;
-
+                     DS5_BT_FEATURE_PREFETCH_COUNT) &&
+                    (report_id ==
+                     feature_prefetch_ids[feature_prefetch_index])) {
                     feature_request_pending = false;
+                    feature_request_deadline = 0U;
+                    feature_request_retry_at = 0U;
+                    feature_request_attempts = 0U;
                     ++feature_prefetch_index;
-                    request_err = ds5_bt_request_next_feature();
-                    if (request_err != 0) {
-                        printf("DS5 BT: Feature prefetch request failed "
-                               "(err %d)\r\n",
-                               request_err);
+                    if (feature_prefetch_index >=
+                        DS5_BT_FEATURE_PREFETCH_COUNT) {
+                        feature_prefetch_complete = true;
+                        printf("DS5 BT: Feature prefetch complete\r\n");
                     }
                 }
             } else if (received_control_packets <= 4U) {
@@ -300,8 +403,26 @@ void ds5_bt_worker(void *parameter)
     (void)parameter;
 
     while (1) {
-        if (ds5_l2cap_event_receive(&event)) {
+        bool prefetch_active;
+        bool event_received;
+
+        ds5_bt_lifecycle_lock();
+        prefetch_active = ds5_bt_feature_prefetch_active();
+        ds5_bt_lifecycle_unlock();
+
+        if (prefetch_active) {
+            event_received = ds5_l2cap_event_receive_timeout(
+                &event, DS5_BT_FEATURE_RETRY_MS);
+        } else {
+            event_received = ds5_l2cap_event_receive(&event);
+        }
+
+        if (event_received) {
             ds5_bt_process_l2cap_event(&event);
         }
+
+        ds5_bt_lifecycle_lock();
+        ds5_bt_service_feature_prefetch();
+        ds5_bt_lifecycle_unlock();
     }
 }

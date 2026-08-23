@@ -108,7 +108,9 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("DS5_USB_AUDIO_HAPTICS_DECIMATION    16U", source)
         self.assertIn("DS5_USB_AUDIO_SPEAKER_INPUT_STEP    16U", source)
         self.assertIn("DS5_USB_AUDIO_SPEAKER_OUTPUT_STEP   15U", source)
-        self.assertIn("xQueueReceive(audio_queue, &packet, portMAX_DELAY)", source)
+        self.assertIn("xQueueReceive(audio_queue, &packet, 0U)", source)
+        self.assertIn("ulTaskNotifyTake(pdTRUE, wait_ticks)", ingress_task)
+        self.assertIn("ds5_usb_audio_notify_task();", source)
         self.assertIn("ds5_usb_audio_queue_speaker_frame(packet->generation)", source)
         self.assertIn("xQueueReceiveFromISR(audio_queue", source)
         self.assertIn("DS5_USB_AUDIO_TASK_PRIORITY", source)
@@ -134,6 +136,25 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("usbd_audio_open", adapter)
         self.assertIn("usbd_audio_close", adapter)
         self.assertIn("usbd_audio_init_intf", adapter)
+
+    def test_audio_out_arm_failure_retries_from_ingress_task(self):
+        source = AUDIO_SOURCE.read_text(encoding="utf-8")
+        arm_start = source.index("static void ds5_usb_audio_arm_out")
+        arm_end = source.index(
+            'extern "C" void ds5_usb_audio_on_out_complete', arm_start
+        )
+        arm = source[arm_start:arm_end]
+        task_start = source.index("static void ds5_usb_audio_task")
+        task_end = source.index("static void ds5_usb_codec_task", task_start)
+        task = source[task_start:task_end]
+
+        self.assertIn("DS5_USB_AUDIO_OUT_RETRY_MS", source)
+        self.assertIn("audio_arm_retry_pending = true;", arm)
+        self.assertIn("xTaskGetTickCountFromISR()", arm)
+        self.assertIn("ds5_usb_audio_notify_task();", arm)
+        self.assertIn("audio_arm_retry_pending", task)
+        self.assertIn("(int32_t)(now - audio_arm_retry_at)", task)
+        self.assertIn("ds5_usb_audio_arm_out();", task)
 
     def test_audio_and_haptics_mailboxes_are_static_and_bounded(self):
         audio_source = AUDIO_MAILBOX.read_text(encoding="utf-8")

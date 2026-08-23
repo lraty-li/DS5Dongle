@@ -136,6 +136,23 @@ class Ds5UsbHidTests(unittest.TestCase):
             "sizeof(hid_receive_report)", source[arm_start:arm_end]
         )
 
+    def test_hid_out_arm_failure_retries_from_task(self):
+        source = HID_SOURCE.read_text(encoding="utf-8")
+        arm_start = source.index("static void ds5_usb_hid_arm_out")
+        arm_end = source.index("static void ds5_usb_hid_out", arm_start)
+        arm = source[arm_start:arm_end]
+        task_start = source.index("static void ds5_usb_hid_task")
+        task_end = source.index("int ds5_usb_hid_init", task_start)
+        task = source[task_start:task_end]
+
+        self.assertIn("DS5_USB_HID_OUT_RETRY_MS", source)
+        self.assertIn("hid_out_arm_retry_pending = true;", arm)
+        self.assertIn("xTaskGetTickCountFromISR()", arm)
+        self.assertIn("ds5_usb_hid_notify();", arm)
+        self.assertIn("hid_out_arm_retry_pending &&", task)
+        self.assertIn("ds5_usb_hid_arm_out();", task)
+        self.assertIn("(int32_t)(now - hid_out_arm_retry_at)", task)
+
     def test_hid_out_preserves_in_band_report_id(self):
         source = HID_SOURCE.read_text(encoding="utf-8")
 

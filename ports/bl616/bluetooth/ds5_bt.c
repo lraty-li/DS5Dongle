@@ -64,7 +64,15 @@ bool control_channel_ready;
 bool interrupt_channel_ready;
 bool calibration_response_received;
 bool feature_request_pending;
+bool feature_prefetch_complete;
+bool feature_prefetch_failed;
 size_t feature_prefetch_index;
+uint8_t feature_request_attempts;
+TickType_t feature_request_deadline;
+TickType_t feature_request_retry_at;
+uint32_t feature_prefetch_retries;
+uint32_t feature_prefetch_timeouts;
+uint32_t feature_prefetch_failures;
 volatile uint32_t received_l2cap_packets;
 uint32_t received_control_packets;
 uint32_t received_interrupt_packets;
@@ -477,7 +485,13 @@ void ds5_bt_get_diagnostics(ds5_bt_diagnostics_t *diagnostics)
     diagnostics->bonded_peer_valid = bonded_peer_valid;
     diagnostics->discovery_active = discovery_in_flight;
     diagnostics->pairing_window_active = pairing_window_active;
+    diagnostics->feature_prefetch_complete = feature_prefetch_complete;
+    diagnostics->feature_request_pending = feature_request_pending;
+    diagnostics->feature_prefetch_failed = feature_prefetch_failed;
     diagnostics->link_generation = link_generation;
+    diagnostics->feature_prefetch_retries = feature_prefetch_retries;
+    diagnostics->feature_prefetch_timeouts = feature_prefetch_timeouts;
+    diagnostics->feature_prefetch_failures = feature_prefetch_failures;
     diagnostics->worker_task_stack_high_water_words =
         ds5_bt_stack_high_water_words(worker_task);
     diagnostics->tx_worker_task_stack_high_water_words =

@@ -28,7 +28,13 @@ typedef struct {
     bool bonded_peer_valid;
     bool discovery_active;
     bool pairing_window_active;
+    bool feature_prefetch_complete;
+    bool feature_request_pending;
+    bool feature_prefetch_failed;
     uint32_t link_generation;
+    uint32_t feature_prefetch_retries;
+    uint32_t feature_prefetch_timeouts;
+    uint32_t feature_prefetch_failures;
     uint16_t worker_task_stack_high_water_words;
     uint16_t tx_worker_task_stack_high_water_words;
 } ds5_bt_diagnostics_t;
