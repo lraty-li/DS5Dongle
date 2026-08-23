@@ -33,8 +33,13 @@ typedef struct {
 #define DS5_HID_CONTROL_PSM          0x0011U
 #define DS5_HID_INTERRUPT_PSM        0x0013U
 #define DS5_L2CAP_MTU                672U
-/* The 0x39 DualSense audio report is 547 bytes before its L2CAP header. */
-#define DS5_L2CAP_MAX_EVENT_PAYLOAD  DS5_L2CAP_MTU
+/*
+ * The 672-byte channel MTU is required for outgoing 0x39 audio reports.  The
+ * controller's incoming HID input, microphone and Feature transactions are
+ * all below 128 bytes, so do not copy the full transmit MTU into every queued
+ * receive event.
+ */
+#define DS5_L2CAP_MAX_EVENT_PAYLOAD  128U
 
 struct bt_conn;
 

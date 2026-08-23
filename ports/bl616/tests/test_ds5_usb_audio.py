@@ -29,6 +29,10 @@ def read_bt_sources():
         path.read_text(encoding="utf-8") for path in BT_SOURCE_PATHS
     )
 L2CAP_HEADER = BL616_DIR / "bluetooth" / "ds5_l2cap.h"
+L2CAP_SOURCE = BL616_DIR / "bluetooth" / "ds5_l2cap.c"
+DEBUG_LOG_HEADER = BL616_DIR / "debug" / "ds5_log.h"
+DEBUG_LOG_SOURCE = BL616_DIR / "debug" / "ds5_log.c"
+MAIN_SOURCE = BL616_DIR / "main.c"
 CMAKE_PATH = BL616_DIR / "CMakeLists.txt"
 DEFCONFIG_PATH = BL616_DIR / "defconfig"
 SDK_OPUS_ARCHIVE = (
@@ -84,6 +88,26 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertNotIn("opus_decoder_create", source)
         self.assertNotIn("malloc(", source)
         self.assertNotIn("free(", source)
+
+    def test_opus_storage_matches_pinned_sdk_abi(self):
+        source = AUDIO_SOURCE.read_text(encoding="utf-8")
+        constants = numeric_macros(AUDIO_SOURCE)
+
+        self.assertEqual(
+            constants["DS5_USB_AUDIO_OPUS_ENCODER_STORAGE_SIZE"], 43308
+        )
+        self.assertEqual(
+            constants["DS5_USB_AUDIO_OPUS_DECODER_STORAGE_SIZE"], 17800
+        )
+        self.assertLess(
+            constants["DS5_USB_AUDIO_OPUS_ENCODER_STORAGE_SIZE"]
+            + constants["DS5_USB_AUDIO_OPUS_DECODER_STORAGE_SIZE"],
+            65536 + 32768,
+        )
+        self.assertIn("static_assert(sizeof(opus_encoder_storage)", source)
+        self.assertIn("static_assert(sizeof(opus_decoder_storage)", source)
+        self.assertIn("encoder_size > sizeof(opus_encoder_storage)", source)
+        self.assertIn("decoder_size > sizeof(opus_decoder_storage)", source)
 
     def test_four_host_channels_route_to_speaker_and_haptics(self):
         source = AUDIO_SOURCE.read_text(encoding="utf-8")
@@ -215,14 +239,40 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertIn("0x0a, 0x24, 0x01, 0x00, 0x01, 0x49, 0x00", source)
         self.assertIn("DS5_USB_HID_INTERFACE_NUMBER", source)
 
-    def test_transport_payload_capacity_covers_full_audio_report(self):
-        source = L2CAP_HEADER.read_text(encoding="utf-8")
+    def test_l2cap_receive_event_is_smaller_than_transmit_mtu(self):
+        header = L2CAP_HEADER.read_text(encoding="utf-8")
+        source = L2CAP_SOURCE.read_text(encoding="utf-8")
+        constants = numeric_macros(L2CAP_HEADER)
 
-        self.assertRegex(
-            source,
+        self.assertEqual(constants["DS5_L2CAP_MTU"], 672)
+        self.assertEqual(constants["DS5_L2CAP_MAX_EVENT_PAYLOAD"], 128)
+        self.assertLess(
+            constants["DS5_L2CAP_MAX_EVENT_PAYLOAD"],
+            constants["DS5_L2CAP_MTU"],
+        )
+        self.assertIn("channel->rx.mtu = DS5_L2CAP_MTU", source)
+        self.assertIn("length > DS5_L2CAP_MAX_EVENT_PAYLOAD", source)
+        self.assertIn("DS5_BT_INPUT_MIN_SIZE", source)
+        self.assertIn("DS5_AUDIO_MIC_OPUS_SIZE", source)
+        self.assertIn("DS5_FEATURE_SET_MAX_PAYLOAD", source)
+        self.assertNotRegex(
+            header,
             r"#define\s+DS5_L2CAP_MAX_EVENT_PAYLOAD\s+DS5_L2CAP_MTU",
         )
-        self.assertRegex(source, r"#define\s+DS5_L2CAP_MTU\s+672U")
+
+    def test_uart_logger_does_not_retain_removed_usb_cdc_ring(self):
+        source = DEBUG_LOG_SOURCE.read_text(encoding="utf-8")
+        header = DEBUG_LOG_HEADER.read_text(encoding="utf-8")
+        main = MAIN_SOURCE.read_text(encoding="utf-8")
+        combined = "\n".join((source, header, main))
+
+        self.assertIn("result = vprintf(format, arguments);", source)
+        self.assertNotIn("log_ring", combined)
+        self.assertNotIn("DS5_LOG_RING_SIZE", combined)
+        self.assertNotIn("ds5_log_peek", combined)
+        self.assertNotIn("ds5_log_discard", combined)
+        self.assertNotIn("ds5_log_dropped_bytes", combined)
+        self.assertNotIn("ds5_log_init", combined)
 
     def test_build_uses_sdk_e907_opus_fixed_point_backend(self):
         cmake = CMAKE_PATH.read_text(encoding="utf-8")

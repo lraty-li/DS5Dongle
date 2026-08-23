@@ -26,6 +26,17 @@
 #define DS5_L2CAP_COMPLETION_SAMPLE_INTERVAL 8U
 #define DS5_L2CAP_COMPLETION_SAMPLE_SLOTS    4U
 
+_Static_assert(DS5_L2CAP_MAX_EVENT_PAYLOAD <= DS5_L2CAP_MTU,
+               "L2CAP event payload cannot exceed the channel MTU");
+_Static_assert(DS5_L2CAP_MAX_EVENT_PAYLOAD >= DS5_BT_INPUT_MIN_SIZE,
+               "L2CAP event payload must hold a DualSense input report");
+_Static_assert(DS5_L2CAP_MAX_EVENT_PAYLOAD >=
+                   (4U + DS5_AUDIO_MIC_OPUS_SIZE),
+               "L2CAP event payload must hold microphone Opus data");
+_Static_assert(DS5_L2CAP_MAX_EVENT_PAYLOAD >=
+                   (2U + DS5_FEATURE_SET_MAX_PAYLOAD),
+               "L2CAP event payload must hold the largest cached Feature");
+
 typedef enum {
     DS5_L2CAP_INIT_NONE = 0,
     DS5_L2CAP_INIT_QUEUE_READY,

@@ -84,8 +84,6 @@ int main(void)
     int rf_err;
 
     board_init();
-    ds5_log_init();
-
     ds5_log_printf("DS5Dongle BL616 HID bridge bring-up\r\n");
 
     configASSERT(configMAX_PRIORITIES > 5U);

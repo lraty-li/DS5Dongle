@@ -59,13 +59,14 @@
 #define DS5_USB_AUDIO_MICROPHONE_PACKET_FRAMES 48U
 
 /*
- * The public Opus API deliberately keeps these structures opaque.  Allocate
- * fixed, aligned storage and validate the library requirements returned
- * by opus_*_get_size() before initialization; no codec allocation occurs at
- * runtime.
+ * The public Opus API deliberately keeps these structures opaque.  The pinned
+ * BouffaloSDK v2.3.30 fixed-point archive reports 43,308 bytes for its stereo
+ * encoder and 17,800 bytes for its mono decoder.  Keep those ABI-specific
+ * sizes explicit and validate them again through opus_*_get_size() before
+ * initialization; no codec allocation occurs at runtime.
  */
-#define DS5_USB_AUDIO_OPUS_ENCODER_STORAGE_SIZE 65536U
-#define DS5_USB_AUDIO_OPUS_DECODER_STORAGE_SIZE 32768U
+#define DS5_USB_AUDIO_OPUS_ENCODER_STORAGE_SIZE 43308U
+#define DS5_USB_AUDIO_OPUS_DECODER_STORAGE_SIZE 17800U
 
 typedef struct {
     uint32_t generation;
@@ -113,6 +114,13 @@ alignas(8) static uint8_t
     opus_encoder_storage[DS5_USB_AUDIO_OPUS_ENCODER_STORAGE_SIZE];
 alignas(8) static uint8_t
     opus_decoder_storage[DS5_USB_AUDIO_OPUS_DECODER_STORAGE_SIZE];
+
+static_assert(sizeof(opus_encoder_storage) ==
+                  DS5_USB_AUDIO_OPUS_ENCODER_STORAGE_SIZE,
+              "pinned Opus encoder storage size mismatch");
+static_assert(sizeof(opus_decoder_storage) ==
+                  DS5_USB_AUDIO_OPUS_DECODER_STORAGE_SIZE,
+              "pinned Opus decoder storage size mismatch");
 
 static volatile bool speaker_stream_open;
 static volatile bool microphone_stream_open;
