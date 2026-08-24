@@ -49,6 +49,7 @@
 #define DS5_USB_AUDIO_ENCODE_BUDGET_US      10667U
 #define DS5_USB_AUDIO_PACKET_GAP_LIMIT_US    1500U
 #define DS5_USB_AUDIO_OUT_RETRY_MS              2U
+#define DS5_USB_AUDIO_IN_RETRY_MS               2U
 #define DS5_USB_AUDIO_HAPTICS_DECIMATION    16U
 #define DS5_USB_AUDIO_SPEAKER_INPUT_FRAMES  512U
 #define DS5_USB_AUDIO_SPEAKER_OUTPUT_FRAMES 480U
@@ -128,6 +129,8 @@ static volatile bool audio_read_pending;
 static volatile bool audio_arm_retry_pending;
 static volatile TickType_t audio_arm_retry_at;
 static volatile bool microphone_write_pending;
+static volatile bool microphone_write_retry_pending;
+static volatile TickType_t microphone_write_retry_at;
 static volatile uint32_t audio_generation;
 static volatile uint32_t received_audio_packets;
 static volatile uint32_t invalid_audio_packets;
@@ -165,6 +168,24 @@ static void ds5_usb_audio_notify_task(void)
         portYIELD_FROM_ISR(task_woken);
     } else {
         xTaskNotifyGive(audio_task);
+    }
+}
+
+static void ds5_usb_audio_notify_codec_task(void)
+{
+    TaskHandle_t task = codec_task;
+
+    if (task == NULL) {
+        return;
+    }
+
+    if (xPortIsInsideInterrupt()) {
+        BaseType_t task_woken = pdFALSE;
+
+        vTaskNotifyGiveFromISR(task, &task_woken);
+        portYIELD_FROM_ISR(task_woken);
+    } else {
+        xTaskNotifyGive(task);
     }
 }
 
@@ -293,6 +314,7 @@ static bool ds5_usb_audio_queue_speaker_frame(uint32_t generation)
     speaker_staging_frame.generation = generation;
     result = xQueueSend(speaker_queue, &speaker_staging_frame, 0U);
     if (result == pdPASS) {
+        ds5_usb_audio_notify_codec_task();
         return true;
     }
 
@@ -302,7 +324,12 @@ static bool ds5_usb_audio_queue_speaker_frame(uint32_t generation)
     }
 
     ++dropped_speaker_input_frames;
-    return xQueueSend(speaker_queue, &speaker_staging_frame, 0U) == pdPASS;
+    result = xQueueSend(speaker_queue, &speaker_staging_frame, 0U);
+    if (result == pdPASS) {
+        ds5_usb_audio_notify_codec_task();
+        return true;
+    }
+    return false;
 }
 
 static void ds5_usb_audio_arm_out(void)
@@ -369,6 +396,8 @@ extern "C" void ds5_usb_audio_on_in_complete(uint8_t busid,
     (void)transferred_bytes;
 
     microphone_write_pending = false;
+    microphone_write_retry_pending = false;
+    ds5_usb_audio_notify_codec_task();
 }
 
 static bool ds5_usb_audio_init_codecs(OpusEncoder **encoder,
@@ -650,6 +679,7 @@ static bool ds5_usb_audio_start_microphone_write(
         return false;
     }
 
+    microphone_write_retry_pending = false;
     for (index = 0U; index < sample_count; ++index) {
         int16_t sample = microphone_muted ? 0 : mono_samples[index];
         size_t output_offset = index *
@@ -664,14 +694,24 @@ static bool ds5_usb_audio_start_microphone_write(
             sample);
     }
 
+    /*
+     * Publish the in-flight state before arming the endpoint so even an
+     * immediate completion callback cannot leave the codec task asleep with a
+     * stale pending flag.
+     */
+    microphone_write_pending = true;
     if (usbd_ep_start_write(audio_bus_id, DS5_USB_AUDIO_IN_EP,
                             microphone_transmit_buffer,
                             sizeof(microphone_transmit_buffer)) != 0) {
+        microphone_write_pending = false;
         ++microphone_write_failures;
+        microphone_write_retry_at =
+            xTaskGetTickCount() +
+            pdMS_TO_TICKS(DS5_USB_AUDIO_IN_RETRY_MS);
+        microphone_write_retry_pending = true;
         return false;
     }
 
-    microphone_write_pending = true;
     return true;
 }
 
@@ -740,6 +780,7 @@ static void ds5_usb_codec_task(void *parameter)
 
     while (1) {
         bool did_work = false;
+        TickType_t wait_ticks = portMAX_DELAY;
 
         /*
          * Keep HID enumeration and BR/EDR reconnect independent of Opus.
@@ -749,11 +790,26 @@ static void ds5_usb_codec_task(void *parameter)
         if (!speaker_stream_open && !microphone_stream_open) {
             microphone_position = 0U;
             microphone_sample_count = 0U;
+            microphone_write_retry_pending = false;
+            microphone_write_retry_at = 0U;
             while (xQueueReceive(speaker_queue, &speaker_codec_frame,
                                  0U) == pdPASS) {
             }
-            vTaskDelay(pdMS_TO_TICKS(5U));
+            while (ds5_audio_mailbox_try_receive_microphone_opus(
+                microphone_opus_data, sizeof(microphone_opus_data))) {
+            }
+            (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
+        }
+
+        if (microphone_write_retry_pending) {
+            TickType_t now = xTaskGetTickCount();
+
+            if ((int32_t)(now - microphone_write_retry_at) >= 0) {
+                microphone_write_retry_pending = false;
+            } else {
+                wait_ticks = microphone_write_retry_at - now;
+            }
         }
 
         if (!codec_initialization_attempted) {
@@ -815,8 +871,9 @@ static void ds5_usb_codec_task(void *parameter)
                 }
             }
 
-            if ((microphone_sample_count - microphone_position) >=
-                DS5_USB_AUDIO_MICROPHONE_PACKET_FRAMES) {
+            if (((microphone_sample_count - microphone_position) >=
+                 DS5_USB_AUDIO_MICROPHONE_PACKET_FRAMES) &&
+                !microphone_write_retry_pending) {
                 if (ds5_usb_audio_start_microphone_write(
                         &microphone_pcm[microphone_position],
                         DS5_USB_AUDIO_MICROPHONE_PACKET_FRAMES)) {
@@ -828,6 +885,8 @@ static void ds5_usb_codec_task(void *parameter)
         } else {
             microphone_position = 0U;
             microphone_sample_count = 0U;
+            microphone_write_retry_pending = false;
+            microphone_write_retry_at = 0U;
             while (ds5_audio_mailbox_try_receive_microphone_opus(
                 microphone_opus_data, sizeof(microphone_opus_data))) {
                 did_work = true;
@@ -835,7 +894,14 @@ static void ds5_usb_codec_task(void *parameter)
         }
 
         if (!did_work) {
-            vTaskDelay(pdMS_TO_TICKS(1U));
+            if (microphone_write_retry_pending) {
+                TickType_t now = xTaskGetTickCount();
+
+                wait_ticks =
+                    (int32_t)(now - microphone_write_retry_at) >= 0 ?
+                        0U : microphone_write_retry_at - now;
+            }
+            (void)ulTaskNotifyTake(pdTRUE, wait_ticks);
         }
     }
 }
@@ -857,13 +923,17 @@ extern "C" void ds5_usb_audio_on_stream_open(uint8_t busid,
         ds5_log_printf("DS5 USB Audio: 48 kHz four-channel speaker OUT "
                        "opened\r\n");
         ds5_usb_audio_arm_out();
+        ds5_usb_audio_notify_codec_task();
     } else if (interface == DS5_USB_AUDIO_MICROPHONE_INTERFACE) {
         microphone_stream_open = true;
         microphone_write_pending = false;
+        microphone_write_retry_pending = false;
+        microphone_write_retry_at = 0U;
         if (ds5_audio_mailbox_publish_microphone_stream_active(true)) {
             ds5_bt_tx_wake();
         }
         ds5_log_printf("DS5 USB Audio: 48 kHz stereo microphone IN opened\r\n");
+        ds5_usb_audio_notify_codec_task();
     }
 }
 
@@ -882,13 +952,17 @@ extern "C" void ds5_usb_audio_on_stream_close(uint8_t busid,
         ds5_audio_mailbox_set_speaker_stream_active(false);
         ds5_bt_tx_wake();
         ds5_log_printf("DS5 USB Audio: speaker OUT closed\r\n");
+        ds5_usb_audio_notify_codec_task();
     } else if (interface == DS5_USB_AUDIO_MICROPHONE_INTERFACE) {
         microphone_stream_open = false;
         microphone_write_pending = false;
+        microphone_write_retry_pending = false;
+        microphone_write_retry_at = 0U;
         if (ds5_audio_mailbox_publish_microphone_stream_active(false)) {
             ds5_bt_tx_wake();
         }
         ds5_log_printf("DS5 USB Audio: microphone IN closed\r\n");
+        ds5_usb_audio_notify_codec_task();
     }
 }
 
@@ -1021,6 +1095,8 @@ int ds5_usb_audio_init(uint8_t busid)
     audio_arm_retry_pending = false;
     audio_arm_retry_at = 0U;
     microphone_write_pending = false;
+    microphone_write_retry_pending = false;
+    microphone_write_retry_at = 0U;
     audio_generation = 0U;
     received_audio_packets = 0U;
     invalid_audio_packets = 0U;
@@ -1089,8 +1165,11 @@ int ds5_usb_audio_init(uint8_t busid)
         audio_queue = NULL;
         return -1;
     }
+    ds5_audio_mailbox_set_microphone_notify(
+        ds5_usb_audio_notify_codec_task);
 
     if (ds5_usb_audio_class_init(busid) != 0) {
+        ds5_audio_mailbox_set_microphone_notify(NULL);
         vTaskDelete(codec_task);
         codec_task = NULL;
         vTaskDelete(audio_task);
@@ -1106,12 +1185,15 @@ int ds5_usb_audio_init(uint8_t busid)
 
 void ds5_usb_audio_deinit(void)
 {
+    ds5_audio_mailbox_set_microphone_notify(NULL);
     speaker_stream_open = false;
     microphone_stream_open = false;
     audio_read_pending = false;
     audio_arm_retry_pending = false;
     audio_arm_retry_at = 0U;
     microphone_write_pending = false;
+    microphone_write_retry_pending = false;
+    microphone_write_retry_at = 0U;
     codecs_ready = false;
     last_audio_completion_us = 0U;
     ds5_audio_mailbox_set_speaker_stream_active(false);
@@ -1151,11 +1233,14 @@ void ds5_usb_audio_handle_event(uint8_t busid, uint8_t event)
         audio_arm_retry_pending = false;
         audio_arm_retry_at = 0U;
         microphone_write_pending = false;
+        microphone_write_retry_pending = false;
+        microphone_write_retry_at = 0U;
         last_audio_completion_us = 0U;
         ++audio_generation;
         ds5_audio_mailbox_set_speaker_stream_active(false);
         (void)ds5_audio_mailbox_publish_microphone_stream_active(false);
         ds5_bt_tx_wake();
+        ds5_usb_audio_notify_codec_task();
         break;
     default:
         break;

@@ -3,6 +3,7 @@
 #include <FreeRTOS.h>
 #include "portmacro.h"
 #include "queue.h"
+#include "task.h"
 
 #include "ds5_protocol.h"
 
@@ -27,6 +28,20 @@ static QueueHandle_t microphone_state_queue;
 static volatile bool speaker_stream_active;
 static uint32_t dropped_speaker_frames;
 static uint32_t dropped_microphone_frames;
+static ds5_audio_mailbox_notify_t microphone_notify;
+
+static void ds5_audio_mailbox_notify_microphone_consumer(void)
+{
+    ds5_audio_mailbox_notify_t notify;
+
+    taskENTER_CRITICAL();
+    notify = microphone_notify;
+    taskEXIT_CRITICAL();
+
+    if (notify != NULL) {
+        notify();
+    }
+}
 
 static bool ds5_audio_mailbox_publish_latest(QueueHandle_t queue,
                                              const void *data,
@@ -81,6 +96,7 @@ int ds5_audio_mailbox_init(void)
     speaker_stream_active = false;
     dropped_speaker_frames = 0U;
     dropped_microphone_frames = 0U;
+    microphone_notify = NULL;
     return 0;
 }
 
@@ -106,9 +122,14 @@ bool ds5_audio_mailbox_try_receive_speaker_opus(uint8_t *data,
 bool ds5_audio_mailbox_publish_microphone_opus(const uint8_t *data,
                                                size_t length)
 {
-    return ds5_audio_mailbox_publish_latest(
+    bool published = ds5_audio_mailbox_publish_latest(
         microphone_queue, data, length, DS5_AUDIO_MIC_OPUS_SIZE,
         &dropped_microphone_frames);
+
+    if (published) {
+        ds5_audio_mailbox_notify_microphone_consumer();
+    }
+    return published;
 }
 
 bool ds5_audio_mailbox_try_receive_microphone_opus(uint8_t *data,
@@ -120,6 +141,14 @@ bool ds5_audio_mailbox_try_receive_microphone_opus(uint8_t *data,
     }
 
     return xQueueReceive(microphone_queue, data, 0U) == pdPASS;
+}
+
+void ds5_audio_mailbox_set_microphone_notify(
+    ds5_audio_mailbox_notify_t notify)
+{
+    taskENTER_CRITICAL();
+    microphone_notify = notify;
+    taskEXIT_CRITICAL();
 }
 
 void ds5_audio_mailbox_set_speaker_stream_active(bool active)

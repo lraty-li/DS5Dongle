@@ -144,6 +144,77 @@ class Ds5UsbAudioTests(unittest.TestCase):
         self.assertNotIn("opus_encode", ingress_task)
         self.assertNotIn("opus_decode", ingress_task)
 
+    def test_codec_task_waits_for_producer_notifications(self):
+        source = AUDIO_SOURCE.read_text(encoding="utf-8")
+        mailbox = AUDIO_MAILBOX.read_text(encoding="utf-8")
+        codec_start = source.index("static void ds5_usb_codec_task(")
+        codec_end = source.index(
+            'extern "C" void ds5_usb_audio_on_stream_open', codec_start
+        )
+        codec_task = source[codec_start:codec_end]
+        speaker_queue_start = source.index(
+            "static bool ds5_usb_audio_queue_speaker_frame("
+        )
+        speaker_queue_end = source.index(
+            "static void ds5_usb_audio_arm_out", speaker_queue_start
+        )
+        speaker_queue = source[speaker_queue_start:speaker_queue_end]
+        in_complete_start = source.index(
+            'extern "C" void ds5_usb_audio_on_in_complete'
+        )
+        in_complete_end = source.index(
+            "static bool ds5_usb_audio_init_codecs", in_complete_start
+        )
+        in_complete = source[in_complete_start:in_complete_end]
+        microphone_write_start = source.index(
+            "static bool ds5_usb_audio_start_microphone_write("
+        )
+        microphone_write_end = source.index(
+            "static void ds5_usb_audio_task", microphone_write_start
+        )
+        microphone_write = source[
+            microphone_write_start:microphone_write_end
+        ]
+
+        self.assertIn(
+            "ulTaskNotifyTake(pdTRUE, portMAX_DELAY)", codec_task
+        )
+        self.assertIn("ulTaskNotifyTake(pdTRUE, wait_ticks)", codec_task)
+        self.assertNotIn("vTaskDelay(", codec_task)
+        self.assertIn("DS5_USB_AUDIO_IN_RETRY_MS", source)
+        self.assertIn("microphone_write_retry_pending", codec_task)
+        self.assertIn("ds5_usb_audio_notify_codec_task();", speaker_queue)
+        self.assertIn("ds5_usb_audio_notify_codec_task();", in_complete)
+        self.assertLess(
+            microphone_write.index("microphone_write_pending = true;"),
+            microphone_write.index("usbd_ep_start_write("),
+        )
+        self.assertIn(
+            "ds5_audio_mailbox_set_microphone_notify(", source
+        )
+        self.assertIn(
+            "ds5_audio_mailbox_set_microphone_notify(NULL);", source
+        )
+        self.assertIn(
+            "ds5_audio_mailbox_notify_microphone_consumer();", mailbox
+        )
+
+    def test_app_start_uses_static_task_and_reports_stack_headroom(self):
+        main = MAIN_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("DS5_APP_TASK_STACK_DEPTH", main)
+        self.assertIn("static StaticTask_t app_task_storage;", main)
+        self.assertIn("static StackType_t app_task_stack[", main)
+        self.assertIn("xTaskCreateStatic(app_start_task", main)
+        self.assertIn("uxTaskGetStackHighWaterMark(NULL)", main)
+        self.assertNotIn("xTaskCreate(app_start_task", main)
+
+    def test_unused_cherryusb_cdc_acm_component_is_disabled(self):
+        defconfig = DEFCONFIG_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("CONFIG_CHERRYUSB_DEVICE_CDC_ACM =n", defconfig)
+        self.assertNotIn("CONFIG_CHERRYUSB_DEVICE_CDC_ACM =y", defconfig)
+
     def test_full_duplex_endpoints_are_armed_and_streams_control_bt(self):
         source = AUDIO_SOURCE.read_text(encoding="utf-8")
         adapter = ADAPTER_SOURCE.read_text(encoding="utf-8")

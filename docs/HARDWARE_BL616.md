@@ -1,72 +1,80 @@
-﻿# BL616 Hardware Record
+# BL616 Hardware Record
 
-## Confirmed
+This document separates observations made on the current board from settings
+inherited from the `bl616dk` SDK baseline.
+
+## Confirmed board properties
 
 - Chip marking: `BL616C50`
-- Chip family: BL616C
-- Build chip setting: `CHIP=bl616`
-- USB connector: Type-C
-- Board has BOOT button
-- Board has onboard antenna
-- Board has red power LED
-- Board has blue user LED
+- Chip family: BL616C; BootROM reports revision A0
+- Build settings: `CHIP=bl616`, `BOARD=bl616dk`
+- USB connector: Type-C with a working native USB data path
+- Flash JEDEC ID: `c86016`
+- Flash capacity: `0x00400000` bytes (4 MiB)
+- Board controls and indicators: BOOT button, onboard antenna, red power LED,
+  and blue user LED
 
-## Markings not yet decoded
+The `bl616dk` configuration is no longer merely a compile-time assumption:
+the current board has completed BootROM communication, erase/write/verification,
+normal firmware boot, Bluetooth operation, and native USB enumeration with this
+configuration. It remains a compatibility mapping rather than a claim that the
+board is electrically identical to the official BL616DK.
+
+## USB modes
+
+### Download mode
+
+- Holding BOOT while reconnecting Type-C enumerates
+  `USB\VID_349B&PID_6160` as a Windows COM port.
+- The COM number is host-assigned. COM3 was observed during the first probe on
+  2026-08-04; later setups commonly assign COM4.
+- The pinned `BLFlashCommand.exe` communicates reliably at 2,000,000 baud.
+- Successful flashes have completed both device writing and SHA256 readback
+  verification.
+
+### Normal firmware mode
+
+- The same Type-C data path successfully enumerates CherryUSB as
+  `DualSense Wireless Controller` (`VID_054C&PID_0CE6`).
+- The firmware forces Full Speed operation to match the wired DualSense.
+- The runtime configuration contains HID and full-duplex UAC1 Audio
+  interfaces. It intentionally contains no CDC ACM interface.
+- USB is deliberately attached only after the Bluetooth state reaches
+  `READY`. With no connected controller, the absence of a host USB device is
+  expected.
+
+These observations confirm the functional USB D+/D- route and supersede the
+initial 2026-08-04 pre-flash observation that native USB was unconfirmed.
+
+## Flash layout
+
+- Boot2: `0x000000`
+- Partition table: `0x00E000`
+- Application firmware: partition-defined offset `0x010000`
+- Partition source: the pinned BL616DK 4 MiB configuration
+
+The RF manufacturing image produced by the SDK is not part of
+`flash_prog_cfg.ini`; the board's factory RF calibration is retained.
+
+## SDK console baseline
+
+The pinned `bl616dk` BSP configures UART0 TX on GPIO21 and RX on GPIO22,
+8-N-1 at 2,000,000 baud. Firmware logging uses this SDK console, but the board
+layout has not yet confirmed that those signals are exposed on accessible
+pads or through a USB-to-UART bridge.
+
+## Markings not decoded
 
 - `6N7PJ9`
 - `2328 F2`
 
-These appear to be manufacturing trace markings and are not currently used
-for the firmware configuration.
+They appear to be manufacturing trace markings and are not used by the
+firmware configuration.
 
-## Temporary build configuration
+## Still to verify electrically
 
-- `BOARD=bl616dk`
-
-This is currently used only because the SDK example builds successfully.
-Board-level compatibility has not yet been confirmed.
-
-## First host enumeration (2026-08-04)
-
-- The board is physically available and connected to the Windows host by its
-  Type-C connector.
-- Windows currently exposes no new COM port and no present unknown/error USB
-  device. The only serial port is the motherboard ACPI `COM1`, so it must not
-  be selected as the board's flashing port.
-- Native USB data connectivity is therefore still unconfirmed. Repeat the
-  enumeration while the board is explicitly placed in download mode before
-  drawing conclusions about the connector or cable.
-
-## Download-mode verification (2026-08-04)
-
-- Holding BOOT while reconnecting Type-C exposes `USB Serial Device (COM3)` as
-  `USB\VID_349B&PID_6160` on the current Windows host.
-- The pinned SDK `BLFlashCommand.exe` completed a read-only BootROM handshake
-  on COM3 at 2,000,000 baud and identified BL616 chip revision A0.
-- Flash JEDEC ID: `c86016`.
-- Detected flash capacity: `0x00400000` bytes (4 MiB), matching the temporary
-  `bl616dk` partition baseline.
-- A 256-byte read at flash offset zero succeeded. No flash erase or write was
-  performed during this probe.
-- This confirms that the Type-C data path exposes a UART-compatible download
-  port in BOOT mode. It does not yet prove that BL616 native USB D+/D- is wired
-  to the connector.
-
-## SDK baseline pending board verification
-
-The pinned `bl616dk` BSP configures its console as UART0 TX on GPIO21 and RX on
-GPIO22, 8-N-1 at 2,000,000 baud. These are SDK baseline values only; the board
-layout has not yet confirmed that either signal reaches the Type-C connector or
-an onboard USB-to-UART bridge.
-
-## Still to verify
-
-- USB D+ and D- connection
-- Whether Type-C is connected directly to BL616 USB
-- Debug UART TX/RX pins
-- UART baud rate
-- BOOT pin
 - RESET circuit
 - Blue LED GPIO and active level
+- Debug UART pad routing
 - Header pinout
-- Power supply voltage and regulator
+- Power-supply regulator and exposed voltage rails

@@ -16,6 +16,17 @@
 #include "ds5_usb_log.h"
 
 #define DS5_BT_STATE_POLL_MS       50U
+#define DS5_APP_TASK_STACK_DEPTH   (configMINIMAL_STACK_SIZE * 8U)
+#define DS5_APP_TASK_PRIORITY      (configMAX_PRIORITIES - 2U)
+
+/*
+ * Controller startup crosses a prebuilt vendor library, so retain the
+ * previously validated 4 KiB budget until the runtime high-water log proves a
+ * smaller bound on hardware.  Static allocation keeps task creation
+ * deterministic and makes that budget explicit.
+ */
+static StaticTask_t app_task_storage;
+static StackType_t app_task_stack[DS5_APP_TASK_STACK_DEPTH];
 
 /* Stop the MCU core while the scheduler has no ready application task. */
 void vApplicationIdleHook(void)
@@ -28,6 +39,7 @@ static void app_start_task(void *parameter)
     ds5_bt_state_t bluetooth_state;
     bool usb_initialized = false;
     bool usb_active = false;
+    bool stack_headroom_logged = false;
     int err;
 
     (void)parameter;
@@ -68,6 +80,17 @@ static void app_start_task(void *parameter)
                     usb_active = should_usb_active;
                     ds5_log_printf("DS5 USB: device %s\r\n",
                                    usb_active ? "connected" : "disconnected");
+                    if (usb_active && !stack_headroom_logged) {
+                        UBaseType_t free_words =
+                            uxTaskGetStackHighWaterMark(NULL);
+
+                        ds5_log_printf(
+                            "DS5: app_start minimum stack headroom "
+                            "%lu bytes\r\n",
+                            (unsigned long)(free_words *
+                                            sizeof(StackType_t)));
+                        stack_headroom_logged = true;
+                    }
                 }
             }
         }
@@ -78,7 +101,6 @@ static void app_start_task(void *parameter)
 
 int main(void)
 {
-    BaseType_t task_result;
     EfErrCode storage_err;
     int mailbox_err;
     int rf_err;
@@ -148,9 +170,10 @@ int main(void)
     }
     ds5_log_printf("DS5: PHY RF initialization complete\r\n");
 
-    task_result = xTaskCreate(app_start_task, "app_start", 1024U, NULL,
-                              configMAX_PRIORITIES - 2U, NULL);
-    if (task_result != pdPASS) {
+    if (xTaskCreateStatic(app_start_task, "app_start",
+                          DS5_APP_TASK_STACK_DEPTH, NULL,
+                          DS5_APP_TASK_PRIORITY, app_task_stack,
+                          &app_task_storage) == NULL) {
         ds5_log_printf("DS5: failed to create startup task\r\n");
         return 0;
     }
